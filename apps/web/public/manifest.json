@@ -1,0 +1,9 @@
+{
+  "name": "OpenKhazana",
+  "short_name": "OpenKhazana",
+  "description": "Open-source Pakistan financial market hub and multi-asset portfolio tracker",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090d16",
+  "theme_color": "#10b981"
+}

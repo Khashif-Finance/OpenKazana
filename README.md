@@ -1,142 +1,97 @@
 # OpenKhazana
 
-**Open-source Pakistan & global financial market terminal, PDF report analyzer, and multi-asset portfolio tracker.**
-
-OpenKhazana brings together live **Pakistan Stock Exchange (PSX)** equities, **330+ Pakistani Mutual Funds & VPS schemes** across 13 AMCs, **SECP monthly Fund Manager Reports (FMRs)**, **PUCARS financial filings**, **SBP macro rates**, international stocks/ETFs, USD/PKR forex, local gold/silver, and crypto—paired with **Pakistan FBR tax accounting**, **Shariah compliance & purification**, and **Pandas/SciPy quantitative analytics**.
-
-> **Zero Demo Data** — All quotes, historical bars, financial statements, mutual fund NAVs, FMR compositions, and macro rates are sourced from live public feeds or user-uploaded official PDFs/spreadsheets.
+An open-source (MIT) **Pakistan Institutional Financial Market Terminal & Multi-Asset Portfolio Platform** — combining live PSX equities, SECP Monthly Fund Manager Reports (FMR), PUCARS Annual & Quarterly PDF report parsing, Pandas quantitative analytics, daily-dividend mutual fund tracking, global stocks/ETFs, gold, FX, crypto, FBR tax compliance, and transparent Shariah screening.
 
 ---
 
-## Core Capabilities
+## Key Capabilities
 
-### Market Intelligence & Screener
-- **Unified Market Hub**: Live **KSE-100**, **KMI-30**, **USD/PKR** (Interbank & Open Market), **24K/22K Gold & Silver** (Tola / 10g / 1g converter), **Crypto** (`BTC`, `ETH`, `USDT`), PSX sector movers, top dividend yields, market breadth, and PUCARS corporate announcements.
-- **PSX & Global Equities (`/stocks/[symbol]`)**:
-  - **TradingView Lightweight Charts** (`1D` Daily & `5M` Intraday) with SMA/EMA/Bollinger overlays, RSI/MACD oscillators, and Price vs. Gross/Net Total-Return toggles.
-  - **Interactive Valuation Lab**: Live 5Y FCF Growth & Sovereign WACC sliders + **5×5 DCF Sensitivity Matrix** (with automatic Bank P/B & ROE valuation lens for financial institutions).
-  - **Accounting & Quality Diagnostics**: 9-point **Piotroski F-Score** rule checklist, **Altman Z-Score**, **3-Factor DuPont ROE decomposition**, automated **Bull vs. Bear Thesis & Red-Flag Digest**, peer sector valuation comparison, and dividend streak radar.
-  - **Multi-Period Annual & Quarterly PDF Report Analyzer**: Parses PUCARS and user-uploaded company Annual/Quarterly PDF reports (`pdfplumber`) into multi-period 3-statement data (Income Statement, Balance Sheet, Cash Flow), auditor opinions, and Directors' Report highlights with **Pandas** growth/margin/CAGR modeling and CSV export.
-  - **Mutual Fund Institutional Ownership Radar**: Cross-links parsed SECP FMR Top-10 equity disclosures to show which Pakistani mutual funds hold a given PSX stock.
-  - **Transparent Shariah Screening**: KMI / AAOIFI debt-to-assets, non-compliant income, illiquid asset ratios, and exact **Dividend Purification Rate %**.
+### 1. Investing.com + Sarmaya.pk Hybrid Market Terminal (5-Heading Mega-Menu)
+- **Clean 5-Heading Navigation (`Markets` · `Stocks` · `Mutual Funds` · `Portfolio` · `Settings`)**: Dropdown subcategories with instant `Ctrl+K` / `⌘K` global search and a toggleable scrolling market tape.
+- **Sarmaya.pk-Style PSX Market Map & Sector Explorer (`/markets/sectors`)**: Market-cap-weighted interactive Treemap heatmap + Pandas Sector & Industry Explorer across all 37 PSX sectors with expandable stock accordions, median P/E, ROE, Dividend Yield & Shariah ratios.
+- **PSX IPOs, Latest Developments & Corporate Calendar (`/markets/ipos`, `/markets/calendar`)**: Tracks PSX Main & GEM Board IPOs with live Post-IPO Return % vs Strike Price, official PSX manuals, PUCARS material developments, and a unified Ex-Dividend / Bonus / Board Meeting / Results calendar filterable to your holdings & watchlist.
+- **Pakistan Financial News Hub (`/markets/news`)**: Live RSS aggregation from Business Recorder, Profit (Pakistan Today), Dawn Business, Express Tribune & Investing.com — auto-tagged to 501 PSX tickers and 37 official sectors, surfaced both globally and inside every `/stocks/[symbol]` page.
+- **Side-by-Side Stock Comparison Matrix (`/stocks/compare`) & Filings Downloads Hub (`/stocks/downloads`)**: Compare 2–5 stocks head-to-head on normalized performance & fundamentals, and 1-click download official PSX PUCARS announcement PDFs, Annual/Quarterly reports, AMC SECP FMR PDFs & 3-statement CSVs.
+- **Dual-Mode Open-Source Self-Hosting (`AUTH_MODE=local` | `multiuser`)**: Zero-login local workspace out of the box with 1-click JSON Workspace Backup/Restore & Shariah-first preferences in `/settings`, or switch `AUTH_MODE=multiuser` in `.env` for hardened multi-tenant cloud/VPS hosting.
+- **Tabbed Institutional Stock Workbench (`/stocks/[symbol]`)**:
+  - **Overview & Chart**: TradingView `lightweight-charts` candlestick/volume/indicator overlays (`PRICE`, `GROSS_TR`, `NET_FILER`, `NET_NON_FILER` + Shariah purification), **Investing.com-style 20-Indicator Technical Summary Speedometer Gauge**, **Pandas Cross-Sectional Factor Percentile Ranks**, and **Held by Pakistani Mutual Funds (SECP FMR Radar)**.
+  - **Financials & Reports**: Multi-period Annual & Quarterly 3-Statement analyzer powered by **Pandas** (YoY growth, common-size margins, 3Y/5Y CAGRs, cash conversion, Sloan accruals, DSO/DIO) with auto-parsed PUCARS PDFs, drag-and-drop PDF upload, Independent Auditor's Opinion, Directors' Highlights, and 1-click CSV/PDF downloads.
+  - **Technicals & Seasonality**: Full 12 Moving Averages + 8 Oscillators Buy/Sell table, classic pivots, and **Pandas Monthly Seasonality Return Heatmap (Year × Month)**.
+  - **Valuation & Quality Lab**: Interactive 2-stage FCF DCF Growth/WACC sliders + 5×5 Sensitivity Matrix, 3-Factor DuPont ROE, collapsible 9-point Piotroski accounting checklist, sector peer multiples, and automated Bull/Bear & Red-Flag digest.
+  - **Dividends & Filings** + **News & Sector Coverage**: Multi-year cash dividend streak, downloadable PUCARS PDFs, and company-specific + sector news.
 
-### Pakistani Mutual Funds, VPS & SECP FMR Engine
-- **Multi-AMC Directory (`/funds`)**: Covers 330+ funds across 13 Pakistani AMCs (Al Meezan, HBL, ABL, JS Investments, NBP, UBL/Al-Ameen, MCB/Alhamra, Lakson, Mahaana, AKD, etc.) with Shariah, Daily Dividend, Category, AMC, and TER filters, Risk-Return scatter plots, and side-by-side comparison.
-- **Dedicated Mutual Fund Fact Sheets (`/funds/[symbol]`)**:
-  - **SECP Monthly FMR Parser**: Automatically ingests official monthly FMR PDF booklets (Al Meezan, HBL, Atlas, JSIL, ABL) plus **drag-and-drop FMR PDF upload** for any Pakistani AMC.
-  - **Full Composition Breakdown**: Asset Allocation, Top-10 Equity Holdings (linked to live PSX quotes with **Implied Portfolio P/E & Dividend Yield**), Sector Allocation, Credit Quality (`AAA`/`AA+`/`Govt`), WAM/Duration, Stability Rating, Fee Anatomy (TER MTD/YTD + Govt Levies + Management Fee), and Manager Commentary.
-  - **Daily Dividend Funds Support**: Handles constant-NAV daily-dividend funds (`MRAF`, `MDIP1`, `NIDDF`, `MCF`, `MICF`, etc.) with compounded total-return wealth curves, Filer/Non-Filer WHT modeling, and daily/monthly/annual income calculators.
-  - **Historical NAV Import**: Built-in CSV/XLSX NAV history uploader for AMCs without public history APIs.
+### 2. SECP Mutual Fund Fact Sheets (`/funds/[symbol]`) & Live Daily Dividend Engine
+- **Automated SECP Monthly FMR PDF Parser**: Discovers and parses official AMC monthly FMR booklets (Al Meezan, HBL Asset, Atlas, JS Investments, ABL Funds) PLUS universal drag-and-drop FMR PDF upload for any AMC — extracting Asset Allocation, Top-10 Equity Holdings (cross-linked to live PSX prices & implied P/E / dividend yield), Sector Allocation, Credit Quality, WAM, Stability Ratings (`AAA(f)` / `AA+(f)`), TER + Govt Levies, and Manager Commentary.
+- **Full Live Daily Dividend Funds Engine**:
+  - Automatically accrues daily dividends (Gross & Net after 15% Active Filer / 30% Non-Filer FBR WHT, zero double-counting with posted ledger entries) inside Portfolio valuations, PnL, TWRR, and XIRR for constant-NAV funds (`MRAF`, `MDIP1`, `MMMP`, `NIDDF`, `MCBADDUB`, `MCF`, `MICF`, `SGOV`).
+  - Interactive **Daily / Monthly / Annual Dividend Income Simulator** + **1-Year Compounded Wealth Curve** comparing Gross TR, Net Filer, Net Non-Filer, and Flat Par NAV.
 
-### Portfolio Ledger, Look-Through X-Ray & Pakistan Tax Engine
-- **Multi-Asset Transaction Ledger (`/portfolio`)**: Supports `BUY`, `SELL`, `OPENING_BALANCE`, `DIVIDEND`, `REINVEST_DIVIDEND` (DRIP), `BONUS`, `RIGHTS`, `SPLIT`, `FEE`, `DEPOSIT`, `WITHDRAWAL`, optional **Auto-Managed PKR Cash Wallet**, **National Savings (NSS)** coupon accrual, and **Daily Dividend Fund** accrual.
-- **Look-Through Portfolio X-Ray**: Explodes Mutual Fund & VPS positions using parsed SECP FMR compositions to reveal true combined Asset Mix, Sector Concentration, and **Direct-vs-Fund Single-Stock Overlaps**.
-- **FBR Tax & Compliance Engine (Finance Act 2024)**:
-  - `ACTIVE_FILER`, `LATE_FILER`, and `NON_FILER` WHT & CGT schedules across all 4 FBR acquisition-date regimes (`< Jul 2013`, `2013–2022`, `2022–2024`, `>= Jul 2024`) plus US W-8BEN / Ireland UCITS dividend WHT.
-  - **Same-Day Intraday Netting** before strict FIFO lot matching and **Section 236Z** deemed-cost bonus share accounting.
-  - **Section 37A Capital Loss Carryforward** (3-year FIFO netting) and **1-Click FBR Section 116(2)** fiscal-year (July 1 – June 30) wealth statement export (JSON/CSV).
-  - **Shariah Dividend Purification**, **XIRR**, **Unitized Virtual-NAV TWRR**, and **CSV/Excel Broker Importer** (CDC, KTrade, Finqalab, AKD, IBKR, AMC exports).
-- **Quant Risk & Strategy Backtester (`/analytics` & `/portfolio`)**:
-  - NumPy, Pandas, SciPy SLSQP & **PyPortfolioOpt** engine: Sharpe, Sortino, Calmar, Max Drawdown, Historical 95% VaR/CVaR, Beta/Alpha, Pairwise Correlation Matrix, Markowitz Max-Sharpe / Min-Vol / HRP rebalancing tickets, Efficient Frontier, 3-Year Monte Carlo Wealth Fan, Macro Stress Tests, and Multi-Asset Strategy Backtesting (Nominal PKR, Real USD, Real CPI-Adjusted).
-- **Watchlists, Alerts & Calculators**: Price & announcement alerts, SIP (FEL & TER), PSX Brokerage/CGT Breakeven, and Zakat Nisab calculators.
+### 3. Transaction-Ledger Portfolio, Quant Lab & Look-Through X-Ray (`/portfolio`)
+- **Multi-Asset Ledger & Pakistan FBR Tax Engine**: FIFO lot matching with same-day intraday netting, Finance Act 2024 4-regime CGT + Section 37A 3-year loss carryforward, Section 236Z bonus tax, FBR Section 116(2) Tax Year reconciliation export, Shariah dividend purification, dual USD/PKR FX return decomposition, and broker CSV/XLSX import (KTrade, Finqalab, AKD, CDC, IBKR).
+- **Look-Through Portfolio X-Ray**: Explodes Mutual Fund & VPS holdings via parsed SECP FMR disclosures to compute true Asset Mix, Combined Sector Concentration, and Direct-vs-Fund Single-Stock Overlaps.
+- **Quantitative Risk & Optimization Lab**: SciPy/PyPortfolioOpt Markowitz Max-Sharpe, Min-Vol & HRP weights with actionable trade tickets, Efficient Frontier, 3-Year Monte Carlo wealth fan, and SBP macro stress tests.
 
 ---
 
 ## Tech Stack
 
-| Layer | Technologies |
-|---|---|
-| **Frontend (`apps/web`)** | Next.js 15 (App Router), React 19, TypeScript, Tailwind CSS v4, TradingView `lightweight-charts`, Recharts, Lucide Icons |
-| **Backend (`apps/api`)** | FastAPI, Python 3.11+, SQLAlchemy 2.0 (async), Pydantic v2, Alembic |
-| **Analytics & PDFs** | Pandas, NumPy, SciPy, PyPortfolioOpt, Statsmodels, `ta`, `pdfplumber`, `openpyxl` |
-| **Data Ingestion** | ARQ + Redis 7 (optional for Docker), `curl_cffi`, `httpx`, `BeautifulSoup4`, `yfinance` |
-| **Storage** | SQLite (`aiosqlite`) for zero-config local runs; PostgreSQL 16 (partitioned `price_bars` + RLS) + Redis 7 for Docker/production |
+- **Frontend (`apps/web`)**: Next.js 15 (App Router, TypeScript), Tailwind CSS v4, TradingView `lightweight-charts`, Recharts, `technicalindicators`, Lucide icons.
+- **Backend (`apps/api`)**: FastAPI, Python 3.12+, SQLAlchemy 2.0 Async, Pydantic v2, Pandas, NumPy, SciPy, `pdfplumber`, `curl_cffi`, `yfinance`, ARQ + Redis (optional for local mode).
+- **Database**: SQLite (zero-config local dev) or PostgreSQL 16 + Redis 7 (Docker / production).
 
 ---
 
 ## Quick Start
 
-### Option 1: One-Click Local Run on Windows (SQLite, No Docker Required)
-Double-click or run from the project root:
-```bat
-start-local.bat
-```
-Starts the FastAPI backend on `http://127.0.0.1:8000` and Next.js frontend on `http://127.0.0.1:3000`.
+### Option A — 1-Click Local Launch (Zero Docker, Zero Login Required)
+- **Windows**: Double-click or run `start-local.bat` from the repository root.
+- **macOS / Linux**: Run `chmod +x start-local.sh && ./start-local.sh`.
 
-### Option 2: Manual Local Development
+Or start both services manually:
 
-**Backend (`apps/api`)**
-```bash
+```powershell
+# Terminal 1 — Backend API (SQLite local DB, zero-login AUTH_MODE=local)
 cd apps/api
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
-pip install -e ".[dev]"
+$env:DATABASE_URL="sqlite+aiosqlite:///./openkhazana_local.db"
+$env:AUTH_MODE="local"
+.\.venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8000
 
-# Local SQLite quickstart:
-export DATABASE_URL="sqlite+aiosqlite:///./openkhazana_local.db"  # Windows PowerShell: $env:DATABASE_URL="sqlite+aiosqlite:///./openkhazana_local.db"
-uvicorn app.main:app --reload --port 8000
-```
-
-**Frontend (`apps/web`)**
-```bash
+# Terminal 2 — Frontend Web App
 cd apps/web
 npm install
-npm run dev
+npm run build
+npm run start -- -H 127.0.0.1 -p 3000
 ```
-Open `http://localhost:3000` in your browser.
 
-### Option 3: Docker Compose (PostgreSQL 16 + Redis 7 + ARQ Worker)
+Open **http://localhost:3000** in your browser.
+
+### Option B — Docker Compose (PostgreSQL 16 + Redis 7 + ARQ Worker)
 ```bash
 cp .env.example .env
+# Set AUTH_MODE=multiuser and a 32+ char SECRET_KEY in .env for cloud/VPS multi-user hosting
 docker compose up --build
 ```
 
 ---
 
-## Testing & Linting
+## Running Tests
 
 ```bash
-# Backend unit & API integration tests
 cd apps/api
-pytest -v
+pytest tests -v
+```
 
-# Frontend production build & type-check
+```bash
 cd apps/web
 npm run build
 ```
 
 ---
 
-## Project Structure
-
-```text
-OpenKazana/
-├── apps/
-│   ├── api/
-│   │   ├── app/
-│   │   │   ├── api/          # FastAPI routers (market, analytics, portfolio, auth, watchlists)
-│   │   │   ├── models/       # SQLAlchemy 2.0 ORM models (Assets, FMRs, Financial Periods, Ledger)
-│   │   │   ├── scrapers/     # PSX DPS, PUCARS PDFs, SECP FMRs, Multi-AMC NAVs, SBP Macro, FX/Gold, Crypto, Intl
-│   │   │   ├── services/     # Accounting/FIFO, FBR Tax, Pandas Analytics, Deep Fundamentals, Quant, Backtester
-│   │   │   └── workers/      # ARQ scheduled worker & scraper registry
-│   │   └── tests/            # Pytest unit & async integration test suite
-│   └── web/
-│       └── src/
-│           ├── app/          # Next.js pages (/, /stocks/[symbol], /funds/[symbol], /portfolio, /analytics, /status...)
-│           └── components/   # Charts, AppShell, Modals, Theme & Currency context
-├── docker-compose.yml
-├── start-local.bat
-├── .env.example
-└── LICENSE
-```
-
----
-
 ## Disclaimer
 
-OpenKhazana is open-source software for informational, research, and personal portfolio tracking purposes only. It is **not** financial, investment, tax, or Shariah advisory software. Always verify FBR tax figures (CGT, Section 236Z bonus tax, Section 116 wealth schedules, WHT), Zakat calculations, financial filings, and Shariah compliance/purification metrics against official PSX/NCCPL/SECP/FBR disclosures and qualified advisors before making decisions or filing taxes.
+OpenKhazana is open-source software provided for informational, analytical, and personal portfolio tracking purposes only. Always verify FBR tax figures (CGT, Section 236Z, Section 116 wealth schedules, WHT, Zakat), Shariah purification metrics, and company financial statements against official PSX/PUCARS/SECP/NCCPL/FBR notices before filing taxes or making investment decisions.
 
 ## License
 
-[MIT](./LICENSE)
+[Apache-2.0](./LICENSE)
