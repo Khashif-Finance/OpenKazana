@@ -1,22 +1,38 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
-import { Activity, AlertTriangle, Globe2, Landmark, Play, Plus, Trash2, TrendingUp } from "lucide-react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Activity, AlertTriangle, Globe2, Landmark, Play, Plus, RefreshCw, Trash2, TrendingUp } from "lucide-react";
 import {
   Area,
   AreaChart,
+  Bar,
+  BarChart,
   CartesianGrid,
+  Cell,
   Legend,
   Line,
   LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
 import { useAppContext } from "@/components/CurrencyContext";
-import { apiFetch } from "@/lib/api";
+import { ChartSkeleton, KpiGridSkeleton } from "@/components/Skeletons";
+import { TickerAutocomplete } from "@/components/TickerAutocomplete";
+import { apiFetch, apiFetchCached, invalidateApiCache } from "@/lib/api";
 import { formatMoney, formatNumber, formatPct, pctColorClass } from "@/lib/format";
+
+interface CpiBasketItem {
+  code: string;
+  group: string;
+  weight_pct: number;
+  index: number;
+  yoy_pct: number;
+  mom_pct: number | null;
+  contribution_pct: number;
+}
 
 interface MacroItem {
   code: string;
@@ -27,6 +43,7 @@ interface MacroItem {
   unit: string;
   as_of_date: string | null;
   source: string;
+  history?: Array<Record<string, unknown>>;
   updated_at: string;
 }
 
@@ -102,8 +119,16 @@ interface MacroRegimePoint {
 
 interface MacroRegimePayload {
   latest_policy_rate_pct: number | null;
+  policy_rate_as_of_date?: string | null;
   latest_cpi_yoy_pct: number | null;
+  latest_cpi_mom_pct?: number | null;
+  cpi_as_of_date?: string | null;
+  cpi_source?: string | null;
+  cpi_frequency?: string | null;
   latest_real_rate_pct: number | null;
+  sbp_fx_reserves_bn?: number | null;
+  remittances_mn?: number | null;
+  current_account_mn?: number | null;
   series: MacroRegimePoint[];
 }
 
@@ -111,6 +136,9 @@ export default function QuantAndMacroAnalyticsPage() {
   const { currency, usdToPkr } = useAppContext();
   const [macro, setMacro] = useState<MacroItem[]>([]);
   const [regime, setRegime] = useState<MacroRegimePayload | null>(null);
+  const [macroLoading, setMacroLoading] = useState(true);
+  const [refreshingMacro, setRefreshingMacro] = useState(false);
+  const [macroNotice, setMacroNotice] = useState<string | null>(null);
 
   const [legs, setLegs] = useState<BacktestLeg[]>([
     { symbol: "MEBL", weight_pct: 40 },
@@ -133,10 +161,41 @@ export default function QuantAndMacroAnalyticsPage() {
   const [btLoading, setBtLoading] = useState(false);
   const [btError, setBtError] = useState<string | null>(null);
 
-  useEffect(() => {
-    apiFetch<MacroItem[]>("/api/v1/market/macro").then(setMacro).catch(() => {});
-    apiFetch<MacroRegimePayload>("/api/v1/market/macro/regime").then(setRegime).catch(() => {});
+  const loadMacroData = useCallback((forceRefresh = false) => {
+    setMacroLoading(true);
+    Promise.all([
+      apiFetchCached<MacroItem[]>("/api/v1/market/macro", 120_000, { forceRefresh, onUpdate: setMacro }),
+      apiFetchCached<MacroRegimePayload>("/api/v1/market/macro/regime", 120_000, { forceRefresh, onUpdate: setRegime }),
+    ])
+      .then(([mRows, regData]) => {
+        setMacro(mRows);
+        setRegime(regData);
+      })
+      .catch(() => {})
+      .finally(() => setMacroLoading(false));
   }, []);
+
+  useEffect(() => {
+    loadMacroData(false);
+  }, [loadMacroData]);
+
+  const handleRefreshMacro = async () => {
+    setRefreshingMacro(true);
+    setMacroNotice(null);
+    try {
+      const res = await apiFetch<{ ok: boolean; indicators_updated: number }>("/api/v1/market/macro/refresh", {
+        method: "POST",
+      });
+      invalidateApiCache("/api/v1/market/macro");
+      invalidateApiCache("/api/v1/market/overview");
+      loadMacroData(true);
+      setMacroNotice(`Synced ${res.indicators_updated} live PBS SDMX CPI & SBP EasyData indicators.`);
+    } catch (err) {
+      setMacroNotice(err instanceof Error ? err.message : "Failed to refresh SBP/PBS macro indicators.");
+    } finally {
+      setRefreshingMacro(false);
+    }
+  };
 
   const runBacktest = async (overrideLegs?: BacktestLeg[], overrideBench?: string) => {
     const activeLegs = (overrideLegs || legs).filter((l) => l.symbol.trim() && l.weight_pct > 0);
@@ -195,11 +254,35 @@ export default function QuantAndMacroAnalyticsPage() {
     return TENOR_ORDER.filter((t) => byTenor[t]).map((t) => byTenor[t]);
   }, [macro]);
 
-  const highlightCodes = ["SBP_POLICY_RATE", "KIBOR_6M", "TBILL_6M", "PIB_10Y", "PK_CPI_YOY", "US_10Y_TREASURY"];
-  const keyCards = macro.filter((m) => highlightCodes.includes(m.code));
+  const macroByCode = useMemo(() => {
+    const map: Record<string, MacroItem> = {};
+    for (const m of macro) map[m.code] = m;
+    return map;
+  }, [macro]);
 
-  const addLeg = () => {
-    const sym = newSym.trim().toUpperCase();
+  const cpiBasket = useMemo<CpiBasketItem[]>(() => {
+    const basket = macroByCode["PK_CPI_BASKET"];
+    if (!basket?.history || !Array.isArray(basket.history)) return [];
+    return (basket.history as unknown as CpiBasketItem[])
+      .filter((x) => x && typeof x.group === "string" && typeof x.yoy_pct === "number")
+      .sort((a, b) => b.yoy_pct - a.yoy_pct);
+  }, [macroByCode]);
+
+  const highlightCodes = [
+    "SBP_POLICY_RATE",
+    "PK_CPI_YOY",
+    "TBILL_6M",
+    "KIBOR_6M",
+    "SBP_FX_RESERVES_BN",
+    "SBP_REMITTANCES_MN",
+    "SBP_CURRENT_ACCOUNT_MN",
+    "US_10Y_TREASURY",
+  ];
+  const keyCards = highlightCodes.map((c) => macroByCode[c]).filter(Boolean);
+  const tableIndicators = macro.filter((m) => m.code !== "PK_CPI_BASKET");
+
+  const addLeg = (explicitSym?: string) => {
+    const sym = (explicitSym ?? newSym).trim().toUpperCase();
     if (!sym || legs.some((l) => l.symbol === sym)) return;
     setLegs((prev) => [...prev, { symbol: sym, weight_pct: 20 }]);
     setNewSym("");
@@ -239,78 +322,121 @@ export default function QuantAndMacroAnalyticsPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold flex items-center gap-2">
-          <TrendingUp className="w-6 h-6 text-emerald-500" />
-          Quant Strategy Backtester, SBP Macro &amp; Risk Lab
-        </h1>
-        <p className="text-sm okz-muted">
-          Live State Bank of Pakistan Policy Rate, KIBOR &amp; PKRV Sovereign Yield Curve paired with a Multi-Asset
-          Total-Return Strategy Backtester (FBR Tax-Adjusted), Monte Carlo Fan &amp; Macro Stress Tests.
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold flex items-center gap-2">
+            <TrendingUp className="w-6 h-6 text-emerald-500" />
+            Quant Strategy Backtester, SBP EasyData &amp; PBS Macro Lab
+          </h1>
+          <p className="text-sm okz-muted">
+            Authoritative PBS Monthly CPI (12 COICOP groups) &amp; SBP EasyData Policy Rate, KIBOR, T-Bills, PIBs, FX
+            Reserves, Remittances &amp; Current Account paired with a Multi-Asset Total-Return Strategy Backtester.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={handleRefreshMacro}
+          disabled={refreshingMacro}
+          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shrink-0 self-start disabled:opacity-60"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${refreshingMacro ? "animate-spin" : ""}`} />
+          {refreshingMacro ? "Syncing SBP & PBS..." : "Refresh SBP / PBS Macro"}
+        </button>
       </div>
 
+      {macroNotice && (
+        <div className="px-4 py-2.5 rounded-lg text-xs bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
+          {macroNotice}
+        </div>
+      )}
+
       {/* Macro KPIs */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-        {(keyCards.length > 0 ? keyCards : macro.slice(0, 6)).map((m) => (
-          <div key={m.code} className="okz-card p-3.5 space-y-1">
-            <div className="flex items-center justify-between text-[11px] okz-muted">
-              <span className="truncate">{m.name}</span>
-              {m.country === "US" ? (
-                <Globe2 className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-              ) : (
-                <Landmark className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-              )}
-            </div>
-            <div className="text-xl font-bold font-mono">
-              {formatNumber(m.value, 2)}
-              <span className="text-xs font-normal ml-0.5">{m.unit}</span>
-            </div>
-            <div className="text-[10px] okz-muted truncate">
-              {m.source} {m.as_of_date ? `• ${m.as_of_date}` : ""}
-            </div>
-          </div>
-        ))}
-      </div>
+      {macroLoading && macro.length === 0 ? (
+        <KpiGridSkeleton count={8} cols="grid-cols-2 sm:grid-cols-4" />
+      ) : (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {(keyCards.length > 0 ? keyCards : tableIndicators.slice(0, 8)).map((m) => {
+            const valNum = Number(m.value);
+            const isExternalSigned = m.code === "SBP_CURRENT_ACCOUNT_MN";
+            const momSub =
+              m.code === "PK_CPI_YOY" && macroByCode["PK_CPI_MOM"]
+                ? `MoM: ${Number(macroByCode["PK_CPI_MOM"].value) >= 0 ? "+" : ""}${formatNumber(macroByCode["PK_CPI_MOM"].value, 2)}%`
+                : m.code === "SBP_FX_RESERVES_BN" && macroByCode["PK_TOTAL_FX_RESERVES_BN"]
+                  ? `Total w/ Banks: $${formatNumber(macroByCode["PK_TOTAL_FX_RESERVES_BN"].value, 2)} Bn`
+                  : null;
+            return (
+              <div key={m.code} className="okz-card p-3.5 space-y-1">
+                <div className="flex items-center justify-between text-[11px] okz-muted">
+                  <span className="truncate font-medium">{m.name}</span>
+                  {m.country === "US" ? (
+                    <Globe2 className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                  ) : (
+                    <Landmark className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                  )}
+                </div>
+                <div
+                  className={`text-xl font-bold font-mono ${
+                    isExternalSigned ? (valNum >= 0 ? "text-emerald-400" : "text-rose-400") : ""
+                  }`}
+                >
+                  {isExternalSigned && valNum > 0 ? "+" : ""}
+                  {formatNumber(m.value, m.unit.includes("Mn") ? 0 : 2)}
+                  <span className="text-xs font-normal ml-1 okz-muted">{m.unit}</span>
+                </div>
+                {momSub && <div className="text-[11px] text-sky-400 font-medium">{momSub}</div>}
+                <div className="text-[10px] okz-muted truncate">
+                  {m.source} {m.as_of_date ? `• ${m.as_of_date}` : ""}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Yield Curve + Complete Rate Table */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="okz-card p-5 lg:col-span-2 space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold">Pakistan KIBOR &amp; Sovereign PKRV Yield Curve (T-Bills &amp; PIBs)</h2>
-            <span className="text-xs okz-muted">Source: SBP / MUFAP PKRV</span>
+        {macroLoading && macro.length === 0 ? (
+          <div className="lg:col-span-2">
+            <ChartSkeleton heightClass="h-60" />
           </div>
-          {yieldCurveData.length === 0 ? (
-            <div className="h-56 flex items-center justify-center text-xs okz-muted">
-              No SBP yield curve data synced yet. Run &quot;SBP Macro Rates&quot; on Data Status.
+        ) : (
+          <div className="okz-card p-5 lg:col-span-2 space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold">Pakistan KIBOR &amp; Sovereign PKRV Yield Curve (T-Bills &amp; PIBs)</h2>
+              <span className="text-xs okz-muted">Source: State Bank of Pakistan</span>
             </div>
-          ) : (
-            <div className="h-60 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={yieldCurveData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                  <XAxis dataKey="tenor" tick={{ fontSize: 11, fill: "#94a3b8" }} />
-                  <YAxis domain={["auto", "auto"]} unit="%" tick={{ fontSize: 11, fill: "#94a3b8" }} width={44} />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "var(--card)",
-                      borderColor: "var(--border)",
-                      fontSize: "12px",
-                      borderRadius: "8px",
-                    }}
-                  />
-                  <Legend wrapperStyle={{ fontSize: "11px" }} />
-                  <Line type="monotone" dataKey="kibor" name="KIBOR %" stroke="#f59e0b" strokeWidth={2.5} dot />
-                  <Line type="monotone" dataKey="tbill" name="T-Bill %" stroke="#10b981" strokeWidth={2.5} dot />
-                  <Line type="monotone" dataKey="pib" name="PIB Bond %" stroke="#38bdf8" strokeWidth={2.5} dot />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </div>
+            {yieldCurveData.length === 0 ? (
+              <div className="h-56 flex items-center justify-center text-xs okz-muted">
+                No SBP yield curve data synced yet. Click &ldquo;Refresh SBP / PBS Macro&rdquo; above.
+              </div>
+            ) : (
+              <div className="h-60 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={yieldCurveData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <XAxis dataKey="tenor" tick={{ fontSize: 11, fill: "#94a3b8" }} />
+                    <YAxis domain={["auto", "auto"]} unit="%" tick={{ fontSize: 11, fill: "#94a3b8" }} width={44} />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: "var(--card)",
+                        borderColor: "var(--border)",
+                        fontSize: "12px",
+                        borderRadius: "8px",
+                      }}
+                    />
+                    <Legend wrapperStyle={{ fontSize: "11px" }} />
+                    <Line type="monotone" dataKey="kibor" name="KIBOR %" stroke="#f59e0b" strokeWidth={2.5} dot />
+                    <Line type="monotone" dataKey="tbill" name="T-Bill %" stroke="#10b981" strokeWidth={2.5} dot />
+                    <Line type="monotone" dataKey="pib" name="PIB Bond %" stroke="#38bdf8" strokeWidth={2.5} dot />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="okz-card p-5 space-y-2.5 overflow-y-auto max-h-80">
-          <h2 className="text-sm font-semibold">All Synced Macro &amp; Money Market Benchmarks</h2>
+          <h2 className="text-sm font-semibold">All Synced SBP &amp; PBS Benchmarks ({tableIndicators.length})</h2>
           <table className="w-full text-xs">
             <thead className="border-b border-[var(--border)] okz-muted text-left">
               <tr>
@@ -320,17 +446,16 @@ export default function QuantAndMacroAnalyticsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border)]">
-              {macro.map((m) => (
+              {tableIndicators.map((m) => (
                 <tr key={m.code}>
                   <td className="py-1.5 pr-2">
                     <div className="font-medium">{m.name}</div>
                     <div className="text-[10px] okz-muted font-mono">{m.code}</div>
                   </td>
-                  <td className="py-1.5 text-right font-mono font-bold text-emerald-500">
-                    {formatNumber(m.value, 2)}
-                    {m.unit}
+                  <td className="py-1.5 text-right font-mono font-bold text-emerald-500 whitespace-nowrap">
+                    {formatNumber(m.value, m.unit.includes("Mn") ? 0 : 2)} {m.unit}
                   </td>
-                  <td className="py-1.5 text-right okz-muted">{m.as_of_date || "Live"}</td>
+                  <td className="py-1.5 text-right okz-muted whitespace-nowrap">{m.as_of_date || "Live"}</td>
                 </tr>
               ))}
             </tbody>
@@ -338,62 +463,127 @@ export default function QuantAndMacroAnalyticsPage() {
         </div>
       </div>
 
-      {/* 5-Year Historical Pakistan Macro Regime Chart (SBP Policy Rate vs CPI YoY vs USD/PKR) */}
-      {regime && regime.series.length > 0 && (
-        <div className="okz-card p-5 space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
+      {/* 5-Year Historical Pakistan Macro Regime Chart + PBS 12-Group Inflation Basket */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {regime && regime.series.length > 0 && (
+          <div className={`okz-card p-5 space-y-3 ${cpiBasket.length > 0 ? "lg:col-span-7" : "lg:col-span-12"}`}>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-sm font-semibold">
+                  5-Year Macro Regime: SBP Policy Rate vs {regime.cpi_frequency === "MONTHLY" ? "Monthly PBS CPI YoY" : "CPI YoY"} &amp; USD/PKR
+                </h2>
+                <p className="text-xs okz-muted">
+                  True real interest rate spread (SBP Policy Rate minus CPI) · Source: {regime.cpi_source || "PBS / SBP"}
+                  {regime.cpi_as_of_date ? ` (as of ${regime.cpi_as_of_date.slice(0, 7)})` : ""}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-1.5 text-xs">
+                {regime.latest_policy_rate_pct != null && (
+                  <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-bold">
+                    Policy: {regime.latest_policy_rate_pct.toFixed(2)}%
+                  </span>
+                )}
+                {regime.latest_cpi_yoy_pct != null && (
+                  <span className="px-2 py-0.5 rounded bg-rose-500/15 text-rose-400 font-bold">
+                    CPI: {regime.latest_cpi_yoy_pct.toFixed(2)}%
+                  </span>
+                )}
+                {regime.latest_real_rate_pct != null && (
+                  <span className="px-2 py-0.5 rounded bg-sky-500/15 text-sky-400 font-bold">
+                    Real: {regime.latest_real_rate_pct > 0 ? "+" : ""}
+                    {regime.latest_real_rate_pct.toFixed(2)}%
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="h-72 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={regime.series} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                  <XAxis dataKey="month" tick={{ fontSize: 10, fill: "#94a3b8" }} minTickGap={24} />
+                  <YAxis yAxisId="left" unit="%" tick={{ fontSize: 11, fill: "#94a3b8" }} width={44} />
+                  <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: "#94a3b8" }} width={48} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "var(--card)",
+                      borderColor: "var(--border)",
+                      fontSize: "12px",
+                      borderRadius: "8px",
+                    }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: "11px" }} />
+                  <Line yAxisId="left" type="stepAfter" dataKey="policy_rate_pct" name="SBP Policy Rate %" stroke="#10b981" strokeWidth={2.5} dot={false} />
+                  <Line yAxisId="left" type="monotone" dataKey="cpi_yoy_pct" name="PBS CPI YoY %" stroke="#f43f5e" strokeWidth={2.2} dot={false} />
+                  <Line yAxisId="left" type="monotone" dataKey="real_rate_pct" name="Real Interest Rate %" stroke="#38bdf8" strokeWidth={1.8} strokeDasharray="4 4" dot={false} />
+                  <Line yAxisId="right" type="monotone" dataKey="usd_pkr" name="USD / PKR" stroke="#f59e0b" strokeWidth={2} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        )}
+
+        {cpiBasket.length > 0 && (
+          <div className="okz-card p-5 space-y-3 lg:col-span-5">
             <div>
-              <h2 className="text-sm font-semibold">
-                5-Year Pakistan Macro Regime: SBP Policy Rate vs Headline CPI YoY &amp; USD/PKR
-              </h2>
+              <h2 className="text-sm font-semibold">PBS 12-Group National CPI Inflation Breakdown (YoY %)</h2>
               <p className="text-xs okz-muted">
-                Track real interest rate cycles (SBP Policy Rate minus CPI) alongside 5Y Rupee exchange rate trajectory.
+                Official COICOP categories &amp; weights from Pakistan Bureau of Statistics ({macroByCode["PK_CPI_BASKET"]?.as_of_date?.slice(0, 7)})
               </p>
             </div>
-            <div className="flex flex-wrap gap-2 text-xs">
-              {regime.latest_policy_rate_pct != null && (
-                <span className="px-2.5 py-1 rounded bg-emerald-500/15 text-emerald-400 font-bold">
-                  Policy Rate: {regime.latest_policy_rate_pct.toFixed(2)}%
-                </span>
-              )}
-              {regime.latest_cpi_yoy_pct != null && (
-                <span className="px-2.5 py-1 rounded bg-rose-500/15 text-rose-400 font-bold">
-                  CPI YoY: {regime.latest_cpi_yoy_pct.toFixed(2)}%
-                </span>
-              )}
-              {regime.latest_real_rate_pct != null && (
-                <span className="px-2.5 py-1 rounded bg-sky-500/15 text-sky-400 font-bold">
-                  Real Rate: {regime.latest_real_rate_pct > 0 ? "+" : ""}
-                  {regime.latest_real_rate_pct.toFixed(2)}%
-                </span>
-              )}
+            <div className="h-72 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={cpiBasket} layout="vertical" margin={{ top: 4, right: 16, left: 4, bottom: 4 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
+                  <XAxis type="number" unit="%" tick={{ fontSize: 10, fill: "#94a3b8" }} />
+                  <YAxis
+                    type="category"
+                    dataKey="group"
+                    width={138}
+                    tick={{ fontSize: 10, fill: "#94a3b8" }}
+                    tickFormatter={(v: string) => (v.length > 22 ? `${v.slice(0, 21)}…` : v)}
+                  />
+                  <ReferenceLine x={0} stroke="var(--border)" />
+                  <Tooltip
+                    content={({ active, payload }) => {
+                      if (!active || !payload?.length) return null;
+                      const g = payload[0].payload as CpiBasketItem;
+                      return (
+                        <div className="p-2.5 rounded-lg border border-[var(--border)] bg-[var(--card)] text-xs shadow-lg space-y-0.5">
+                          <div className="font-bold">{g.group}</div>
+                          <div>
+                            YoY Inflation:{" "}
+                            <strong className={g.yoy_pct > 10 ? "text-rose-400" : g.yoy_pct < 0 ? "text-emerald-400" : "text-amber-400"}>
+                              {g.yoy_pct > 0 ? "+" : ""}
+                              {g.yoy_pct.toFixed(2)}%
+                            </strong>
+                          </div>
+                          {g.mom_pct != null && (
+                            <div>
+                              MoM Change: <strong>{g.mom_pct > 0 ? "+" : ""}{g.mom_pct.toFixed(2)}%</strong>
+                            </div>
+                          )}
+                          <div className="okz-muted">
+                            CPI Weight: <strong>{g.weight_pct.toFixed(2)}%</strong> · Headline Contrib:{" "}
+                            <strong>{g.contribution_pct >= 0 ? "+" : ""}{g.contribution_pct.toFixed(2)} pts</strong>
+                          </div>
+                        </div>
+                      );
+                    }}
+                  />
+                  <Bar dataKey="yoy_pct" name="YoY %" radius={[0, 4, 4, 0]}>
+                    {cpiBasket.map((entry) => (
+                      <Cell
+                        key={entry.code}
+                        fill={entry.yoy_pct >= 12 ? "#f43f5e" : entry.yoy_pct >= 6 ? "#f59e0b" : entry.yoy_pct >= 0 ? "#38bdf8" : "#10b981"}
+                      />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
             </div>
           </div>
-          <div className="h-64 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={regime.series} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                <XAxis dataKey="month" tick={{ fontSize: 10, fill: "#94a3b8" }} minTickGap={24} />
-                <YAxis yAxisId="left" unit="%" tick={{ fontSize: 11, fill: "#94a3b8" }} width={44} />
-                <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: "#94a3b8" }} width={52} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: "var(--card)",
-                    borderColor: "var(--border)",
-                    fontSize: "12px",
-                    borderRadius: "8px",
-                  }}
-                />
-                <Legend wrapperStyle={{ fontSize: "11px" }} />
-                <Line yAxisId="left" type="stepAfter" dataKey="policy_rate_pct" name="SBP Policy Rate %" stroke="#10b981" strokeWidth={2.5} dot={false} />
-                <Line yAxisId="left" type="monotone" dataKey="cpi_yoy_pct" name="Pakistan CPI YoY %" stroke="#f43f5e" strokeWidth={2} dot={false} />
-                <Line yAxisId="left" type="monotone" dataKey="real_rate_pct" name="Real Interest Rate %" stroke="#38bdf8" strokeWidth={1.8} strokeDasharray="4 4" dot={false} />
-                <Line yAxisId="right" type="monotone" dataKey="usd_pkr" name="USD / PKR" stroke="#f59e0b" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Multi-Asset Strategy Backtester */}
       <div className="okz-card p-5 space-y-5">
@@ -465,16 +655,18 @@ export default function QuantAndMacroAnalyticsPage() {
                 </div>
               ))}
               <div className="flex items-center gap-2 pt-1">
-                <input
+                <TickerAutocomplete
                   value={newSym}
-                  onChange={(e) => setNewSym(e.target.value)}
-                  placeholder="Add symbol (e.g. OGDC, AAPL, MRAF)"
-                  className="flex-1 px-2.5 py-1.5 rounded border border-[var(--border)] bg-[var(--bg)] text-xs"
+                  onChange={setNewSym}
+                  onSelect={(item) => addLeg(item.symbol)}
+                  clearOnSelect
+                  placeholder="Type ticker or name (e.g. Meezan, OGDC, AAPL, MRAF)..."
+                  className="flex-1"
                 />
                 <button
                   type="button"
-                  onClick={addLeg}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-[var(--border)] hover:border-emerald-500 font-semibold"
+                  onClick={() => addLeg()}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-[var(--border)] hover:border-emerald-500 font-semibold shrink-0"
                 >
                   <Plus className="w-3.5 h-3.5" /> Add
                 </button>

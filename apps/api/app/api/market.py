@@ -23,6 +23,7 @@ from app.api.deps import (
     require_admin_or_api_key,
     resolve_asset_by_symbol,
 )
+from app.core.cache import api_cache
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.redis_client import get_redis
@@ -177,78 +178,118 @@ def _to_scraper_run_out(r: ScraperRun) -> ScraperRunOut:
 
 @router.get("/overview", response_model=MarketOverviewOut)
 async def market_overview(db: AsyncSession = Depends(get_db)):
-    usd_to_pkr = await get_usd_to_pkr_rate(db)
-    stmt = select(Asset).options(selectinload(Asset.psx_profile)).where(Asset.owner_user_id.is_(None))
-    assets = (await db.execute(stmt)).scalars().all()
+    async def _load() -> MarketOverviewOut:
+        usd_to_pkr = await get_usd_to_pkr_rate(db)
+        stmt = select(Asset).options(selectinload(Asset.psx_profile)).where(Asset.owner_user_id.is_(None))
+        assets = (await db.execute(stmt)).scalars().all()
 
-    indices = [_to_asset_summary(a) for a in assets if a.asset_class in {"PSX_INDEX", "INTL_INDEX"}]
-    fx_rates = [_to_asset_summary(a) for a in assets if a.asset_class == "FX"]
-    gold_rates = [_to_asset_summary(a) for a in assets if a.asset_class == "GOLD"]
-    crypto_rates = [_to_asset_summary(a) for a in assets if a.asset_class == "CRYPTO"]
+        indices = [_to_asset_summary(a) for a in assets if a.asset_class in {"PSX_INDEX", "INTL_INDEX"}]
+        fx_rates = [_to_asset_summary(a) for a in assets if a.asset_class == "FX"]
+        gold_rates = [_to_asset_summary(a) for a in assets if a.asset_class == "GOLD"]
+        crypto_rates = [_to_asset_summary(a) for a in assets if a.asset_class == "CRYPTO"]
 
-    equities = [a for a in assets if a.asset_class in {"PSX_EQUITY", "PSX_ETF", "INTL_EQUITY", "INTL_ETF"}]
-    psx_equities = [a for a in equities if a.asset_class in {"PSX_EQUITY", "PSX_ETF"}]
-    liquid_psx = [a for a in psx_equities if a.volume > 0] or psx_equities
-    top_gainers = [_to_asset_summary(a) for a in sorted(liquid_psx, key=lambda x: x.change_pct, reverse=True)[:5]]
-    top_losers = [_to_asset_summary(a) for a in sorted(liquid_psx, key=lambda x: x.change_pct)[:5]]
+        equities = [a for a in assets if a.asset_class in {"PSX_EQUITY", "PSX_ETF", "INTL_EQUITY", "INTL_ETF"}]
+        psx_equities = [a for a in equities if a.asset_class in {"PSX_EQUITY", "PSX_ETF"}]
+        liquid_psx = [a for a in psx_equities if a.volume > 0] or psx_equities
+        top_gainers = [_to_asset_summary(a) for a in sorted(liquid_psx, key=lambda x: x.change_pct, reverse=True)[:5]]
+        top_losers = [_to_asset_summary(a) for a in sorted(liquid_psx, key=lambda x: x.change_pct)[:5]]
 
-    div_rows = [
-        _to_screener_row(a, a.psx_profile)
-        for a in equities
-        if a.psx_profile is not None
-    ]
-    div_rows.sort(key=lambda r: r.dividend_yield_pct, reverse=True)
+        div_rows = [
+            _to_screener_row(a, a.psx_profile)
+            for a in equities
+            if a.psx_profile is not None
+        ]
+        div_rows.sort(key=lambda r: r.dividend_yield_pct, reverse=True)
 
-    ann_stmt = (
-        select(Announcement, Asset)
-        .join(Asset, Announcement.asset_id == Asset.id)
-        .where(Asset.owner_user_id.is_(None))
-        .order_by(desc(Announcement.published_at))
-        .limit(8)
-    )
-    anns = [
-        AnnouncementOut(
-            id=ann.id,
-            symbol=asset.symbol,
-            asset_name=asset.name,
-            title=ann.title,
-            category=ann.category,
-            published_at=ann.published_at,
-            source_url=ann.source_url,
-            summary=ann.summary,
+        ann_stmt = (
+            select(Announcement, Asset)
+            .join(Asset, Announcement.asset_id == Asset.id)
+            .where(Asset.owner_user_id.is_(None))
+            .order_by(desc(Announcement.published_at))
+            .limit(8)
         )
-        for ann, asset in (await db.execute(ann_stmt)).all()
-    ]
+        anns = [
+            AnnouncementOut(
+                id=ann.id,
+                symbol=asset.symbol,
+                asset_name=asset.name,
+                title=ann.title,
+                category=ann.category,
+                published_at=ann.published_at,
+                source_url=ann.source_url,
+                summary=ann.summary,
+            )
+            for ann, asset in (await db.execute(ann_stmt)).all()
+        ]
 
-    macro_rows = (
-        await db.execute(select(MacroIndicator).order_by(MacroIndicator.category.asc(), MacroIndicator.code.asc()))
-    ).scalars().all()
-    macro_list = [
-        {
-            "code": m.code,
-            "name": m.name,
-            "country": m.country,
-            "category": m.category,
-            "value": float(m.value),
-            "unit": m.unit,
-            "as_of_date": m.as_of_date.isoformat(),
-            "source": m.source,
-        }
-        for m in macro_rows
-    ]
+        macro_rows = (
+            await db.execute(select(MacroIndicator).order_by(MacroIndicator.category.asc(), MacroIndicator.code.asc()))
+        ).scalars().all()
+        macro_list = [
+            {
+                "code": m.code,
+                "name": m.name,
+                "country": m.country,
+                "category": m.category,
+                "value": float(m.value),
+                "unit": m.unit,
+                "as_of_date": m.as_of_date.isoformat(),
+                "source": m.source,
+            }
+            for m in macro_rows
+        ]
 
-    return MarketOverviewOut(
-        indices=indices,
-        fx_rates=fx_rates,
-        gold_rates=gold_rates,
-        crypto_rates=crypto_rates,
-        top_gainers=top_gainers,
-        top_losers=top_losers,
-        top_dividend_yield=div_rows[:5],
-        recent_announcements=anns,
-        usd_to_pkr=usd_to_pkr,
-        macro_indicators=macro_list,
-    )
+        return MarketOverviewOut(
+            indices=indices,
+            fx_rates=fx_rates,
+            gold_rates=gold_rates,
+            crypto_rates=crypto_rates,
+            top_gainers=top_gainers,
+            top_losers=top_losers,
+            top_dividend_yield=div_rows[:5],
+            recent_announcements=anns,
+            usd_to_pkr=usd_to_pkr,
+            macro_indicators=macro_list,
+        )
+
+    return await api_cache.get_or_set("overview:main", 60.0, _load)
+
+
+@router.get("/assets/index")
+async def asset_search_index(db: AsyncSession = Depends(get_db)):
+    """Compact public catalog of all PSX, Global, Mutual Fund, FX, Gold & Crypto assets for instant <1ms client autocomplete."""
+    async def _load() -> list[dict[str, Any]]:
+        rows = (
+            await db.execute(
+                select(
+                    Asset.symbol,
+                    Asset.name,
+                    Asset.asset_class,
+                    Asset.sector_or_category,
+                    Asset.currency,
+                    Asset.last_price,
+                    Asset.change_pct,
+                    Asset.is_shariah_compliant,
+                )
+                .where(Asset.owner_user_id.is_(None))
+                .order_by(Asset.symbol.asc())
+            )
+        ).all()
+        return [
+            {
+                "symbol": sym,
+                "name": name,
+                "asset_class": a_cls,
+                "sector_or_category": sec,
+                "currency": cur,
+                "last_price": float(px),
+                "change_pct": float(chg),
+                "is_shariah_compliant": bool(sh),
+            }
+            for sym, name, a_cls, sec, cur, px, chg, sh in rows
+        ]
+
+    return await api_cache.get_or_set("assets:index", 180.0, _load)
 
 
 @router.get("/assets", response_model=list[AssetSummaryOut])
@@ -424,6 +465,11 @@ async def import_yfinance_ticker(
     loaded = (
         await db.execute(select(Asset).options(selectinload(Asset.psx_profile)).where(Asset.id == asset.id))
     ).scalar_one()
+    api_cache.invalidate_prefix("stocks:")
+    api_cache.invalidate_prefix("assets:")
+    api_cache.invalidate_prefix("screener:")
+    api_cache.invalidate_prefix("sectors:")
+    api_cache.invalidate_prefix("overview:")
     return _to_screener_row(loaded, loaded.psx_profile)
 
 
@@ -440,40 +486,48 @@ async def psx_screener(
     sort_by: str = Query(default="market_cap_mn"),
     db: AsyncSession = Depends(get_db),
 ):
+    async def _load_all_stocks() -> list[PsxScreenerRowOut]:
+        stmt = (
+            select(Asset)
+            .options(selectinload(Asset.psx_profile))
+            .where(
+                Asset.owner_user_id.is_(None),
+                Asset.asset_class.in_(["PSX_EQUITY", "PSX_ETF", "INTL_EQUITY", "INTL_ETF"]),
+            )
+        )
+        assets = (await db.execute(stmt)).scalars().all()
+        return [_to_screener_row(a, a.psx_profile) for a in assets]
+
+    universe = await api_cache.get_or_set("stocks:universe", 90.0, _load_all_stocks)
+
     m_up = market.strip().upper()
     if m_up == "PSX":
-        target_classes = ["PSX_EQUITY", "PSX_ETF"]
+        target_classes = {"PSX_EQUITY", "PSX_ETF"}
     elif m_up in {"INTL", "GLOBAL"}:
-        target_classes = ["INTL_EQUITY", "INTL_ETF"]
+        target_classes = {"INTL_EQUITY", "INTL_ETF"}
     else:
-        target_classes = ["PSX_EQUITY", "PSX_ETF", "INTL_EQUITY", "INTL_ETF"]
+        target_classes = {"PSX_EQUITY", "PSX_ETF", "INTL_EQUITY", "INTL_ETF"}
 
-    stmt = (
-        select(Asset)
-        .options(selectinload(Asset.psx_profile))
-        .where(Asset.owner_user_id.is_(None), Asset.asset_class.in_(target_classes))
-    )
-    if q.strip():
-        like = f"%{q.strip()}%"
-        stmt = stmt.where((Asset.symbol.ilike(like)) | (Asset.name.ilike(like)))
-    if sector and sector != "ALL":
-        stmt = stmt.where(Asset.sector_or_category == sector)
-    if shariah_only:
-        stmt = stmt.where(Asset.is_shariah_compliant.is_(True))
-
-    assets = (await db.execute(stmt)).scalars().all()
+    q_l = q.strip().lower()
     rows: list[PsxScreenerRowOut] = []
-    for a in assets:
-        p = a.psx_profile
-        if kse100_only and (not p or not p.is_kse100):
+    for r in universe:
+        if r.asset_class not in target_classes:
             continue
-        if kmi30_only and (not p or not p.is_kmi30):
+        if q_l and q_l not in r.symbol.lower() and q_l not in r.name.lower():
             continue
-        if max_pe is not None and (not p or p.pe_ratio is None or p.pe_ratio > max_pe):
+        if sector and sector != "ALL" and r.sector_or_category != sector:
             continue
-        if min_div_yield is not None and (not p or p.dividend_yield_pct < min_div_yield):
+        if shariah_only and not r.is_shariah_compliant:
             continue
-        rows.append(_to_screener_row(a, p))
+        if kse100_only and not r.is_kse100:
+            continue
+        if kmi30_only and not r.is_kmi30:
+            continue
+        if max_pe is not None and (r.pe_ratio is None or r.pe_ratio > max_pe):
+            continue
+        if min_div_yield is not None and r.dividend_yield_pct < min_div_yield:
+            continue
+        rows.append(r)
 
     sort_key_map = {
         "market_cap_mn": lambda r: r.market_cap_mn,
@@ -602,6 +656,12 @@ async def stock_detail(
     db: AsyncSession = Depends(get_db),
 ):
     uid = user.id if user else None
+    sym_key = symbol.strip().upper()
+    if uid is None:
+        hit, cached = api_cache.get(f"stock:detail:{sym_key}")
+        if hit:
+            return cached
+
     asset = await resolve_asset_by_symbol(
         symbol,
         db,
@@ -616,6 +676,11 @@ async def stock_detail(
     )
     if asset is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Asset '{symbol}' not found.")
+
+    if asset.owner_user_id is None:
+        hit_pub, cached_pub = api_cache.get(f"stock:detail:{asset.symbol.upper()}")
+        if hit_pub:
+            return cached_pub
 
     if get_settings().environment.lower() != "test":
         if asset.asset_class in {"PSX_EQUITY", "PSX_ETF", "PSX_INDEX"}:
@@ -865,24 +930,27 @@ async def stock_detail(
         risk_free_rate_pct=live_rf_pct,
     )
 
-    # Mutual Fund Institutional Ownership cross-linked from parsed SECP FMR Top-10 holdings
+    # Mutual Fund Institutional Ownership cross-linked from parsed SECP FMR Top-10 holdings (cached 180s)
     institutional_holders: list[dict[str, Any]] = []
     if asset.asset_class in {"PSX_EQUITY", "PSX_ETF"}:
-        fmr_rows = (
-            await db.execute(
-                select(FundFmrSnapshot, Asset)
-                .join(Asset, FundFmrSnapshot.asset_id == Asset.id)
-                .where(Asset.owner_user_id.is_(None))
-            )
-        ).all()
-        sym_up = asset.symbol.upper()
-        for fmr_s, f_asset in fmr_rows:
-            for h in (fmr_s.top_holdings_json or []):
-                if str(h.get("symbol") or "").upper() == sym_up:
+        async def _load_fmr_holders_map() -> dict[str, list[dict[str, Any]]]:
+            fmr_rows = (
+                await db.execute(
+                    select(FundFmrSnapshot, Asset)
+                    .join(Asset, FundFmrSnapshot.asset_id == Asset.id)
+                    .where(Asset.owner_user_id.is_(None))
+                )
+            ).all()
+            by_sym: dict[str, list[dict[str, Any]]] = {}
+            for fmr_s, f_asset in fmr_rows:
+                aum = float(fmr_s.net_assets_mn) if fmr_s.net_assets_mn else None
+                for h in (fmr_s.top_holdings_json or []):
+                    h_sym = str(h.get("symbol") or "").upper()
+                    if not h_sym:
+                        continue
                     wt = float(h.get("weight_pct") or 0.0)
-                    aum = float(fmr_s.net_assets_mn) if fmr_s.net_assets_mn else None
                     est_mn = round((aum * wt) / 100.0, 2) if (aum and wt > 0) else None
-                    institutional_holders.append(
+                    by_sym.setdefault(h_sym, []).append(
                         {
                             "fund_symbol": f_asset.symbol,
                             "fund_name": f_asset.name,
@@ -894,11 +962,12 @@ async def stock_detail(
                             "is_shariah_compliant": f_asset.is_shariah_compliant,
                         }
                     )
-                    break
-        institutional_holders.sort(key=lambda x: (x["est_value_mn"] or 0.0, x["weight_pct"]), reverse=True)
+            for v in by_sym.values():
+                v.sort(key=lambda x: (x["est_value_mn"] or 0.0, x["weight_pct"]), reverse=True)
+            return by_sym
 
-    # Pandas Institutional Suite: Technical Consensus Gauge, Seasonality Heatmap, Sector Factor Ranks & Multi-Period Reports
-    technical_gauge = compute_technical_summary_gauge_pandas(bar_dicts[-300:])
+        holders_map = await api_cache.get_or_set("fmr:holders_map", 180.0, _load_fmr_holders_map)
+        institutional_holders = list(holders_map.get(asset.symbol.upper(), []))
 
     bench_sym = "SPX" if asset.currency == "USD" else "KSE100"
     bench_asset = (
@@ -919,31 +988,32 @@ async def stock_detail(
             )
         )
         bench_bars = [{"bar_time": bt, "close": float(cl)} for bt, cl in b_rows if float(cl) > 0]
-    seasonality = compute_seasonality_and_rolling_pandas(bar_dicts, benchmark_bars=bench_bars)
 
-    factor_ranks: dict[str, Any] | None = None
+    factor_rows: list[dict[str, Any]] | None = None
     if asset.asset_class in {"PSX_EQUITY", "INTL_EQUITY"}:
-        all_eq = (
-            await db.execute(
-                select(Asset)
-                .options(selectinload(Asset.psx_profile), selectinload(Asset.financial_snapshot))
-                .where(Asset.owner_user_id.is_(None), Asset.asset_class == asset.asset_class)
-            )
-        ).scalars().all()
-        factor_rows = [
-            {
-                "symbol": a.symbol,
-                "sector": a.sector_or_category,
-                "pe_ratio": float(a.psx_profile.pe_ratio) if a.psx_profile and a.psx_profile.pe_ratio else None,
-                "pb_ratio": float(a.psx_profile.pb_ratio) if a.psx_profile and a.psx_profile.pb_ratio else None,
-                "roe_pct": float(a.financial_snapshot.roe_pct) if a.financial_snapshot and a.financial_snapshot.roe_pct is not None else (float(a.psx_profile.roe_pct) if a.psx_profile and a.psx_profile.roe_pct is not None else None),
-                "dividend_yield_pct": float(a.psx_profile.dividend_yield_pct) if a.psx_profile and a.psx_profile.dividend_yield_pct else 0.0,
-                "market_cap_mn": float(a.psx_profile.market_cap_mn) if a.psx_profile and a.psx_profile.market_cap_mn else 0.0,
-                "piotroski_f_score": a.financial_snapshot.piotroski_f_score if a.financial_snapshot else None,
-            }
-            for a in all_eq
-        ]
-        factor_ranks = compute_cross_sectional_factor_ranks_pandas(factor_rows, asset.symbol)
+        async def _load_factor_rows() -> list[dict[str, Any]]:
+            all_eq = (
+                await db.execute(
+                    select(Asset)
+                    .options(selectinload(Asset.psx_profile), selectinload(Asset.financial_snapshot))
+                    .where(Asset.owner_user_id.is_(None), Asset.asset_class == asset.asset_class)
+                )
+            ).scalars().all()
+            return [
+                {
+                    "symbol": a.symbol,
+                    "sector": a.sector_or_category,
+                    "pe_ratio": float(a.psx_profile.pe_ratio) if a.psx_profile and a.psx_profile.pe_ratio else None,
+                    "pb_ratio": float(a.psx_profile.pb_ratio) if a.psx_profile and a.psx_profile.pb_ratio else None,
+                    "roe_pct": float(a.financial_snapshot.roe_pct) if a.financial_snapshot and a.financial_snapshot.roe_pct is not None else (float(a.psx_profile.roe_pct) if a.psx_profile and a.psx_profile.roe_pct is not None else None),
+                    "dividend_yield_pct": float(a.psx_profile.dividend_yield_pct) if a.psx_profile and a.psx_profile.dividend_yield_pct else 0.0,
+                    "market_cap_mn": float(a.psx_profile.market_cap_mn) if a.psx_profile and a.psx_profile.market_cap_mn else 0.0,
+                    "piotroski_f_score": a.financial_snapshot.piotroski_f_score if a.financial_snapshot else None,
+                }
+                for a in all_eq
+            ]
+
+        factor_rows = await api_cache.get_or_set(f"stocks:factor_rows:{asset.asset_class}", 180.0, _load_factor_rows)
 
     # Multi-Period Financial Reports (auto-seed from DPS financial_summary_json if no periods persisted yet)
     period_rows = (
@@ -1004,9 +1074,17 @@ async def stock_detail(
         }
         for p in period_rows
     ]
-    financial_reports = analyze_financial_statements_pandas(period_dicts, is_financial=is_fin_sec)
 
-    return StockDetailOut(
+    def _compute_pandas_bundle() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None, dict[str, Any]]:
+        tg = compute_technical_summary_gauge_pandas(bar_dicts[-300:])
+        seas = compute_seasonality_and_rolling_pandas(bar_dicts, benchmark_bars=bench_bars)
+        fr = compute_cross_sectional_factor_ranks_pandas(factor_rows, asset.symbol) if factor_rows else None
+        reps = analyze_financial_statements_pandas(period_dicts, is_financial=is_fin_sec)
+        return tg, seas, fr, reps
+
+    technical_gauge, seasonality, factor_ranks, financial_reports = await asyncio.to_thread(_compute_pandas_bundle)
+
+    result_out = StockDetailOut(
         asset=asset_summary,
         profile=profile_dict,
         shariah=shariah_out,
@@ -1024,6 +1102,9 @@ async def stock_detail(
         factor_ranks=factor_ranks,
         financial_reports=financial_reports,
     )
+    if asset.owner_user_id is None:
+        api_cache.set(f"stock:detail:{asset.symbol.upper()}", result_out, 60.0)
+    return result_out
 
 
 @router.get("/assets/{symbol}/technicals", response_model=TechnicalAnalysisOut)
@@ -1157,32 +1238,37 @@ async def mutual_funds_explorer(
     sort_by: str = Query(default="return_1y_pct"),
     db: AsyncSession = Depends(get_db),
 ):
-    stmt = (
-        select(Asset)
-        .options(selectinload(Asset.mutual_fund_profile), selectinload(Asset.fmr_snapshot))
-        .where(Asset.owner_user_id.is_(None), Asset.asset_class.in_(["MUTUAL_FUND", "VPS_PENSION"]))
-    )
-    if q.strip():
-        like = f"%{q.strip()}%"
-        stmt = stmt.where((Asset.symbol.ilike(like)) | (Asset.name.ilike(like)))
-    if shariah_only:
-        stmt = stmt.where(Asset.is_shariah_compliant.is_(True))
+    async def _load_all_funds() -> list[MutualFundRowOut]:
+        stmt = (
+            select(Asset)
+            .options(selectinload(Asset.mutual_fund_profile), selectinload(Asset.fmr_snapshot))
+            .where(Asset.owner_user_id.is_(None), Asset.asset_class.in_(["MUTUAL_FUND", "VPS_PENSION"]))
+        )
+        assets = (await db.execute(stmt)).scalars().all()
+        return [
+            _to_fund_row(a, a.mutual_fund_profile, a.fmr_snapshot)
+            for a in assets
+            if a.mutual_fund_profile is not None
+        ]
 
-    assets = (await db.execute(stmt)).scalars().all()
+    universe = await api_cache.get_or_set("funds:universe", 120.0, _load_all_funds)
+
+    q_l = q.strip().lower()
     rows: list[MutualFundRowOut] = []
-    for a in assets:
-        m = a.mutual_fund_profile
-        if m is None:
+    for r in universe:
+        if q_l and q_l not in r.symbol.lower() and q_l not in r.name.lower() and q_l not in r.amc_name.lower():
             continue
-        if daily_dividend_only and not m.is_daily_dividend:
+        if shariah_only and not r.is_shariah_compliant:
             continue
-        if amc and amc != "ALL" and m.amc_name != amc:
+        if daily_dividend_only and not r.is_daily_dividend:
             continue
-        if category and category != "ALL" and m.fund_category != category:
+        if amc and amc != "ALL" and r.amc_name != amc:
             continue
-        if max_ter is not None and m.ter_pct > max_ter:
+        if category and category != "ALL" and r.fund_category != category:
             continue
-        rows.append(_to_fund_row(a, m, a.fmr_snapshot))
+        if max_ter is not None and r.ter_pct > max_ter:
+            continue
+        rows.append(r)
 
     sort_map = {
         "return_1y_pct": lambda r: r.return_1y_pct if r.return_1y_pct is not None else Decimal("-999"),
@@ -1245,6 +1331,7 @@ async def trigger_scraper(
 
     if sync:
         run = await scraper_cls().execute_with_telemetry(db)
+        api_cache.invalidate_prefix("")
         return _to_scraper_run_out(run)
 
     run = ScraperRun(

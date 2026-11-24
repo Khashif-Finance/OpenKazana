@@ -13,7 +13,9 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { apiFetch } from "@/lib/api";
+import { ChartSkeleton, TableSkeleton } from "@/components/Skeletons";
+import { TickerAutocomplete } from "@/components/TickerAutocomplete";
+import { apiFetchCached } from "@/lib/api";
 import { formatNumber, formatPct, pctColorClass } from "@/lib/format";
 
 interface CompareStockRow {
@@ -101,18 +103,26 @@ export default function CompareStocksPage() {
     if (symbols.length < 2) return;
     setLoading(true);
     setError(null);
-    apiFetch<ComparePayload>(`/api/v1/market/compare?symbols=${encodeURIComponent(symbols.join(","))}&days=${days}`)
+    apiFetchCached<ComparePayload>(
+      `/api/v1/market/compare?symbols=${encodeURIComponent(symbols.join(","))}&days=${days}`,
+      90_000,
+      { onUpdate: setData },
+    )
       .then(setData)
       .catch((err) => setError(err instanceof Error ? err.message : "Comparison failed"))
       .finally(() => setLoading(false));
   }, [symbols, days]);
 
-  const addSymbol = (e: React.FormEvent) => {
-    e.preventDefault();
-    const s = inputSym.trim().toUpperCase();
+  const addSymbolByCode = (rawSym: string) => {
+    const s = rawSym.trim().toUpperCase();
     if (!s || symbols.includes(s) || symbols.length >= 5) return;
     setSymbols((prev) => [...prev, s]);
     setInputSym("");
+  };
+
+  const addSymbol = (e: React.FormEvent) => {
+    e.preventDefault();
+    addSymbolByCode(inputSym);
   };
 
   const removeSymbol = (sym: string) => {
@@ -201,16 +211,19 @@ export default function CompareStocksPage() {
             </span>
           ))}
           {symbols.length < 5 && (
-            <form onSubmit={addSymbol} className="inline-flex items-center gap-1">
-              <input
+            <form onSubmit={addSymbol} className="inline-flex items-center gap-1.5">
+              <TickerAutocomplete
                 value={inputSym}
-                onChange={(e) => setInputSym(e.target.value.toUpperCase())}
-                placeholder="Add ticker..."
-                className="w-28 px-2.5 py-1 rounded-md border border-[var(--border)] bg-[var(--bg)] font-mono uppercase text-xs"
+                onChange={setInputSym}
+                onSelect={(item) => addSymbolByCode(item.symbol)}
+                assetClasses={["PSX_EQUITY", "PSX_ETF", "INTL_EQUITY", "INTL_ETF"]}
+                clearOnSelect
+                placeholder="Add ticker or company (e.g. Meezan, LUCK)..."
+                className="w-60"
               />
               <button
                 type="submit"
-                className="px-2.5 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white font-semibold inline-flex items-center gap-1"
+                className="px-2.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white font-semibold inline-flex items-center gap-1"
               >
                 <Plus className="w-3 h-3" /> Add
               </button>
@@ -238,7 +251,10 @@ export default function CompareStocksPage() {
       )}
 
       {loading && !data ? (
-        <div className="okz-card p-8 text-center text-sm okz-muted">Computing Pandas multi-stock comparison...</div>
+        <div className="space-y-4">
+          <ChartSkeleton heightClass="h-72" />
+          <TableSkeleton rows={10} cols={5} />
+        </div>
       ) : data && (
         <>
           {/* Normalized Base=100 Overlay Chart */}

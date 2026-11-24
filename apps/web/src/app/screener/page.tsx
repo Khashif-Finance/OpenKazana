@@ -1,9 +1,10 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Download, Filter, Globe2, Plus, Search, ShieldCheck, SlidersHorizontal, TrendingUp } from "lucide-react";
-import { apiFetch } from "@/lib/api";
+import { Download, Filter, Globe2, Plus, Search, ShieldCheck, SlidersHorizontal, TrendingUp, X } from "lucide-react";
+import { TableSkeleton } from "@/components/Skeletons";
+import { apiFetch, invalidateApiCache } from "@/lib/api";
 import { formatNumber, formatPct, pctColorClass } from "@/lib/format";
 
 interface IntlSearchHit {
@@ -81,7 +82,12 @@ export default function CrossMarketScreenerPage() {
   const [importingSym, setImportingSym] = useState<string | null>(null);
   const [importNotice, setImportNotice] = useState<string | null>(null);
 
+  const abortRef = useRef<AbortController | null>(null);
+
   const runScan = useCallback(async () => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setLoading(true);
     try {
       const p = new URLSearchParams();
@@ -103,12 +109,15 @@ export default function CrossMarketScreenerPage() {
       if (supertrendBullOnly) p.set("supertrend_bull_only", "true");
       p.set("sort_by", sortBy);
       p.set("limit", "150");
-      const data = await apiFetch<ScreenerRow[]>(`/api/v1/market/screener/scan?${p.toString()}`);
+      const data = await apiFetch<ScreenerRow[]>(`/api/v1/market/screener/scan?${p.toString()}`, {
+        signal: controller.signal,
+      });
       setRows(data);
-    } catch {
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setRows([]);
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [
     market,
@@ -157,6 +166,7 @@ export default function CrossMarketScreenerPage() {
       setImportNotice(`Imported ${sym} with 5Y daily history & deep fundamentals.`);
       setIntlHits([]);
       setIntlQuery("");
+      invalidateApiCache("");
       runScan();
     } catch (err) {
       setImportNotice(err instanceof Error ? err.message : `Failed to import ${sym}.`);
@@ -168,8 +178,11 @@ export default function CrossMarketScreenerPage() {
   useEffect(() => {
     const t = setTimeout(() => {
       runScan();
-    }, 180);
-    return () => clearTimeout(t);
+    }, 300);
+    return () => {
+      clearTimeout(t);
+      abortRef.current?.abort();
+    };
   }, [runScan]);
 
   const exportCsv = () => {
@@ -402,12 +415,24 @@ export default function CrossMarketScreenerPage() {
       <div className="okz-card p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end text-xs">
         <div>
           <label className="block okz-muted mb-1">Search Ticker / Company</label>
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="MEBL, LUCK, AAPL..."
-            className="w-full px-3 py-2 rounded-md border border-[var(--border)] bg-[var(--bg)] text-sm"
-          />
+          <div className="relative">
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="MEBL, Meezan, LUCK, AAPL..."
+              className="w-full px-3 pr-8 py-2 rounded-md border border-[var(--border)] bg-[var(--bg)] text-sm"
+            />
+            {q && (
+              <button
+                type="button"
+                onClick={() => setQ("")}
+                aria-label="Clear ticker search"
+                className="absolute right-2.5 top-2.5 okz-muted hover:text-[var(--text)]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
         </div>
 
         <div>
@@ -587,6 +612,9 @@ export default function CrossMarketScreenerPage() {
       </div>
 
       {/* Results Table */}
+      {loading && rows.length === 0 ? (
+        <TableSkeleton rows={10} cols={8} />
+      ) : (
       <div className="okz-card overflow-x-auto">
         <table className="w-full text-xs sm:text-sm">
           <thead className="border-b border-[var(--border)] text-xs okz-muted text-left">
@@ -757,6 +785,7 @@ export default function CrossMarketScreenerPage() {
           </tbody>
         </table>
       </div>
+      )}
     </div>
   );
 }

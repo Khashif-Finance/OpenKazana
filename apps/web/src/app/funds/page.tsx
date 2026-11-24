@@ -1,8 +1,20 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Calculator, ExternalLink, FileText, LineChart, Repeat, ShieldCheck, Upload, X } from "lucide-react";
+import {
+  Calculator,
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  FileText,
+  LineChart,
+  Repeat,
+  Search,
+  ShieldCheck,
+  Upload,
+  X,
+} from "lucide-react";
 import {
   CartesianGrid,
   Legend,
@@ -17,7 +29,8 @@ import {
   ZAxis,
 } from "recharts";
 import { BarPoint, PriceChart } from "@/components/PriceChart";
-import { apiFetch } from "@/lib/api";
+import { TableSkeleton } from "@/components/Skeletons";
+import { apiFetch, apiFetchCached, invalidateApiCache } from "@/lib/api";
 import { formatNumber, formatPct, pctColorClass } from "@/lib/format";
 
 interface MutualFundRow {
@@ -103,13 +116,14 @@ interface FundScatterPoint {
   bar_count: number;
 }
 
+const FUNDS_PAGE_SIZE = 50;
+
 export default function MutualFundsPage() {
-  const [funds, setFunds] = useState<MutualFundRow[]>([]);
-  const [scatterPoints, setScatterPoints] = useState<FundScatterPoint[]>([]);
+  const [allFunds, setAllFunds] = useState<MutualFundRow[]>([]);
+  const [loadingFunds, setLoadingFunds] = useState(true);
+  const [allScatterPoints, setAllScatterPoints] = useState<FundScatterPoint[]>([]);
   const [scatterRf, setScatterRf] = useState<number>(12.0);
   const [showScatter, setShowScatter] = useState<boolean>(true);
-  const [amcOptions, setAmcOptions] = useState<string[]>([]);
-  const [categoryOptions, setCategoryOptions] = useState<string[]>([]);
 
   const [q, setQ] = useState("");
   const [amc, setAmc] = useState("");
@@ -119,6 +133,8 @@ export default function MutualFundsPage() {
   const [dailyDividendOnly, setDailyDividendOnly] = useState(false);
   const [fmrOnly, setFmrOnly] = useState(false);
   const [sortBy, setSortBy] = useState("return_1y_pct");
+  const [page, setPage] = useState(1);
+  const [showAll, setShowAll] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
 
   const [activeFund, setActiveFund] = useState<MutualFundRow | null>(null);
@@ -142,43 +158,106 @@ export default function MutualFundsPage() {
     }
   }, []);
 
-  useEffect(() => {
-    const params = new URLSearchParams();
-    if (q) params.set("q", q);
-    if (amc) params.set("amc", amc);
-    if (category) params.set("category", category);
-    if (maxTer) params.set("max_ter", maxTer);
-    if (shariahOnly) params.set("shariah_only", "true");
-    if (dailyDividendOnly) params.set("daily_dividend_only", "true");
-    params.set("sort_by", sortBy);
-
-    apiFetch<MutualFundRow[]>(`/api/v1/market/funds?${params.toString()}`)
-      .then((res) => {
-        const finalRows = fmrOnly ? res.filter((f) => f.has_fmr) : res;
-        setFunds(finalRows);
-        setAmcOptions((prev) =>
-          prev.length > 0 ? prev : Array.from(new Set(res.map((f) => f.amc_name).filter(Boolean))).sort()
-        );
-        setCategoryOptions((prev) =>
-          prev.length > 0 ? prev : Array.from(new Set(res.map((f) => f.fund_category).filter(Boolean))).sort()
-        );
+  const loadDirectory = useCallback((forceRefresh = false) => {
+    setLoadingFunds(true);
+    Promise.all([
+      apiFetchCached<MutualFundRow[]>("/api/v1/market/funds", 120_000, { forceRefresh, onUpdate: setAllFunds }),
+      apiFetchCached<{ risk_free_rate_pct: number; points: FundScatterPoint[] }>(
+        "/api/v1/market/funds/scatter",
+        300_000,
+        {
+          forceRefresh,
+          onUpdate: (res) => {
+            setAllScatterPoints(res.points || []);
+            if (res.risk_free_rate_pct) setScatterRf(res.risk_free_rate_pct);
+          },
+        },
+      ),
+    ])
+      .then(([fundRows, scatterRes]) => {
+        setAllFunds(fundRows);
+        setAllScatterPoints(scatterRes.points || []);
+        if (scatterRes.risk_free_rate_pct) setScatterRf(scatterRes.risk_free_rate_pct);
       })
-      .catch(() => {});
-  }, [q, amc, category, maxTer, shariahOnly, dailyDividendOnly, fmrOnly, sortBy, refreshTick]);
+      .catch(() => {})
+      .finally(() => setLoadingFunds(false));
+  }, []);
 
   useEffect(() => {
-    const sp = new URLSearchParams();
-    if (shariahOnly) sp.set("shariah_only", "true");
-    if (category) sp.set("category", category);
-    apiFetch<{ risk_free_rate_pct: number; points: FundScatterPoint[] }>(
-      `/api/v1/market/funds/scatter?${sp.toString()}`
-    )
-      .then((res) => {
-        setScatterPoints(res.points || []);
-        if (res.risk_free_rate_pct) setScatterRf(res.risk_free_rate_pct);
-      })
-      .catch(() => {});
-  }, [shariahOnly, category, refreshTick]);
+    loadDirectory(refreshTick > 0);
+  }, [loadDirectory, refreshTick]);
+
+  const amcOptions = useMemo(
+    () => Array.from(new Set(allFunds.map((f) => f.amc_name).filter(Boolean))).sort(),
+    [allFunds],
+  );
+  const categoryOptions = useMemo(
+    () => Array.from(new Set(allFunds.map((f) => f.fund_category).filter(Boolean))).sort(),
+    [allFunds],
+  );
+
+  // Instant 0ms client-side filtering & sorting across all 330+ funds
+  const funds = useMemo(() => {
+    const qLow = q.trim().toLowerCase();
+    const maxTerNum = maxTer.trim() !== "" ? Number(maxTer) : null;
+
+    const matched = allFunds.filter((f) => {
+      if (
+        qLow &&
+        !f.symbol.toLowerCase().includes(qLow) &&
+        !f.name.toLowerCase().includes(qLow) &&
+        !f.amc_name.toLowerCase().includes(qLow) &&
+        !f.fund_category.toLowerCase().includes(qLow)
+      ) {
+        return false;
+      }
+      if (amc && f.amc_name !== amc) return false;
+      if (category && f.fund_category !== category) return false;
+      if (shariahOnly && !f.is_shariah_compliant) return false;
+      if (dailyDividendOnly && !f.is_daily_dividend) return false;
+      if (fmrOnly && !f.has_fmr) return false;
+      if (maxTerNum != null && Number.isFinite(maxTerNum) && Number(f.ter_pct || 0) > maxTerNum) return false;
+      return true;
+    });
+
+    matched.sort((a, b) => {
+      if (sortBy === "ter_pct") return Number(a.ter_pct || 99) - Number(b.ter_pct || 99);
+      if (sortBy === "aum_mn") return Number(b.aum_mn || 0) - Number(a.aum_mn || 0);
+      if (sortBy === "annualized_yield_pct") {
+        return Number(b.annualized_yield_pct ?? -999) - Number(a.annualized_yield_pct ?? -999);
+      }
+      if (sortBy === "return_3y_pct") return Number(b.return_3y_pct ?? -999) - Number(a.return_3y_pct ?? -999);
+      return Number(b.return_1y_pct ?? -999) - Number(a.return_1y_pct ?? -999);
+    });
+    return matched;
+  }, [allFunds, q, amc, category, maxTer, shariahOnly, dailyDividendOnly, fmrOnly, sortBy]);
+
+  const scatterPoints = useMemo(() => {
+    const catLow = category.trim().toLowerCase();
+    return allScatterPoints.filter((p) => {
+      if (shariahOnly && !p.is_shariah_compliant) return false;
+      if (catLow && !(p.fund_category || "").toLowerCase().includes(catLow)) return false;
+      return true;
+    });
+  }, [allScatterPoints, shariahOnly, category]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [q, amc, category, maxTer, shariahOnly, dailyDividendOnly, fmrOnly, sortBy]);
+
+  const totalPages = Math.max(1, Math.ceil(funds.length / FUNDS_PAGE_SIZE));
+  const displayedFunds = showAll ? funds : funds.slice((page - 1) * FUNDS_PAGE_SIZE, page * FUNDS_PAGE_SIZE);
+
+  const resetFundFilters = () => {
+    setQ("");
+    setAmc("");
+    setCategory("");
+    setMaxTer("");
+    setShariahOnly(false);
+    setDailyDividendOnly(false);
+    setFmrOnly(false);
+    setSortBy("return_1y_pct");
+  };
 
   useEffect(() => {
     if (!activeFund) {
@@ -216,6 +295,7 @@ export default function MutualFundsPage() {
         { method: "POST", body: fd }
       );
       setUploadMsg(`Imported ${res.bars_inserted} new NAV bars (${res.rows_parsed} parsed: ${res.date_from} → ${res.date_to}).`);
+      invalidateApiCache("/api/v1/market/funds");
       setRefreshTick((t) => t + 1);
     } catch (err) {
       setUploadMsg(err instanceof Error ? err.message : "Failed to import NAV history file.");
@@ -238,6 +318,7 @@ export default function MutualFundsPage() {
         { method: "POST", body: fd }
       );
       setFmrUploadMsg(`Parsed SECP FMR (${res.report_label}) — updated composition & holdings for ${res.matched_funds} fund(s).`);
+      invalidateApiCache("/api/v1/market/funds");
       setRefreshTick((t) => t + 1);
     } catch (err) {
       setFmrUploadMsg(err instanceof Error ? err.message : "Failed to parse uploaded FMR PDF booklet.");
@@ -293,15 +374,84 @@ export default function MutualFundsPage() {
         </div>
       )}
 
+      {/* 1-Click Smart Fund Presets */}
+      <div className="flex flex-wrap items-center gap-1.5 text-xs">
+        <span className="okz-muted mr-1 font-medium">Quick Presets:</span>
+        <button
+          type="button"
+          onClick={() => {
+            resetFundFilters();
+            setShariahOnly(true);
+            setDailyDividendOnly(true);
+            setSortBy("annualized_yield_pct");
+          }}
+          className="px-2.5 py-1 rounded-md border border-[var(--border)] bg-[var(--card)] hover:border-emerald-500"
+        >
+          Islamic Daily Dividend
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            resetFundFilters();
+            setFmrOnly(true);
+          }}
+          className="px-2.5 py-1 rounded-md border border-[var(--border)] bg-[var(--card)] hover:border-emerald-500"
+        >
+          SECP FMR Verified
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            resetFundFilters();
+            setMaxTer("1.5");
+            setSortBy("ter_pct");
+          }}
+          className="px-2.5 py-1 rounded-md border border-[var(--border)] bg-[var(--card)] hover:border-emerald-500"
+        >
+          Low-Fee (&le;1.5% TER)
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            resetFundFilters();
+            setShariahOnly(true);
+            setSortBy("return_1y_pct");
+          }}
+          className="px-2.5 py-1 rounded-md border border-[var(--border)] bg-[var(--card)] hover:border-emerald-500"
+        >
+          Top Shariah 1Y
+        </button>
+        <button
+          type="button"
+          onClick={resetFundFilters}
+          className="px-2.5 py-1 rounded-md text-rose-400 border border-[var(--border)] hover:border-rose-400"
+        >
+          Reset
+        </button>
+      </div>
+
       <div className="okz-card p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end">
         <div className="lg:col-span-2">
-          <label className="block text-xs okz-muted mb-1">Search Fund / Symbol</label>
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="e.g. MRAF, NIDDF, MCF, Meezan..."
-            className="w-full px-3 py-2 rounded-md border border-[var(--border)] bg-[var(--bg)] text-sm"
-          />
+          <label className="block text-xs okz-muted mb-1">Instant Search (Fund, Symbol, or AMC)</label>
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3 top-2.5 okz-muted pointer-events-none" />
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="e.g. MIF, MCF, Al Meezan, Cash Fund..."
+              className="w-full pl-9 pr-8 py-2 rounded-md border border-[var(--border)] bg-[var(--bg)] text-sm"
+            />
+            {q && (
+              <button
+                type="button"
+                onClick={() => setQ("")}
+                aria-label="Clear search"
+                className="absolute right-2.5 top-2.5 okz-muted hover:text-[var(--text)]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
         </div>
 
         <div>
@@ -510,24 +660,69 @@ export default function MutualFundsPage() {
         </div>
       )}
 
-      <div className="okz-card overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="border-b border-[var(--border)] text-xs okz-muted text-left">
-            <tr>
-              <th className="py-3 px-4">Compare</th>
-              <th className="py-3 px-4">Fund &amp; AMC</th>
-              <th className="py-3 px-4">Category &amp; Mode</th>
-              <th className="py-3 px-4 text-right">NAV (PKR)</th>
-              <th className="py-3 px-4 text-right">TER %</th>
-              <th className="py-3 px-4 text-right">FEL %</th>
-              <th className="py-3 px-4 text-right">1M</th>
-              <th className="py-3 px-4 text-right">1Y / Yield</th>
-              <th className="py-3 px-4 text-right">3Y</th>
-              <th className="py-3 px-4 text-right">AUM (Mn)</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-[var(--border)]">
-            {funds.map((f) => (
+      {/* Pagination & Result Count */}
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs okz-muted">
+        <span>
+          Showing <strong className="text-[var(--text)]">{displayedFunds.length}</strong> of{" "}
+          <strong className="text-[var(--text)]">{funds.length}</strong> matching funds ({allFunds.length} total)
+        </span>
+        {funds.length > FUNDS_PAGE_SIZE && (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowAll((v) => !v)}
+              className="px-2.5 py-1 rounded border border-[var(--border)] hover:border-emerald-500 font-medium text-[var(--text)]"
+            >
+              {showAll ? "Paginate (50/page)" : `Show All (${funds.length})`}
+            </button>
+            {!showAll && (
+              <div className="inline-flex items-center gap-1">
+                <button
+                  type="button"
+                  disabled={page <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  className="p-1 rounded border border-[var(--border)] disabled:opacity-40 hover:bg-[var(--card-muted)]"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+                <span className="px-2 font-mono">
+                  {page} / {totalPages}
+                </span>
+                <button
+                  type="button"
+                  disabled={page >= totalPages}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  className="p-1 rounded border border-[var(--border)] disabled:opacity-40 hover:bg-[var(--card-muted)]"
+                >
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {loadingFunds && allFunds.length === 0 ? (
+        <TableSkeleton rows={10} cols={8} />
+      ) : (
+        <div className="okz-card overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="border-b border-[var(--border)] text-xs okz-muted text-left">
+              <tr>
+                <th className="py-3 px-4">Compare</th>
+                <th className="py-3 px-4">Fund &amp; AMC</th>
+                <th className="py-3 px-4">Category &amp; Mode</th>
+                <th className="py-3 px-4 text-right">NAV (PKR)</th>
+                <th className="py-3 px-4 text-right">TER %</th>
+                <th className="py-3 px-4 text-right">FEL %</th>
+                <th className="py-3 px-4 text-right">1M</th>
+                <th className="py-3 px-4 text-right">1Y / Yield</th>
+                <th className="py-3 px-4 text-right">3Y</th>
+                <th className="py-3 px-4 text-right">AUM (Mn)</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--border)]">
+              {displayedFunds.map((f) => (
               <tr key={f.symbol} className="hover:bg-[var(--card-muted)]/50">
                 <td className="py-3 px-4">
                   <input
@@ -619,9 +814,10 @@ export default function MutualFundsPage() {
                 <td className="py-3 px-4 text-right">{formatNumber(f.aum_mn, 0)}</td>
               </tr>
             ))}
-          </tbody>
-        </table>
-      </div>
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {activeFund && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">

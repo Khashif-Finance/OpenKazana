@@ -8,6 +8,7 @@ from arq import cron
 from arq.connections import RedisSettings
 from sqlalchemy import delete, select
 
+from app.core.cache import api_cache
 from app.core.config import get_settings
 from app.core.database import apply_rls_context, async_session_factory
 from app.models.market import ScraperRun
@@ -65,9 +66,13 @@ async def on_startup(ctx: dict) -> None:
 async def sync_all_live_sources(
     include_eod: bool = False,
     include_deep_backfill: bool = False,
+    light_only: bool = False,
 ) -> list[ScraperRun]:
     """Run core live market scrapers sequentially and optionally append EOD/deep backfill steps."""
-    pipeline = ["fx_gold", "sbp_macro", "psx_intraday", "crypto_spot", "mufap_nav", "intl_stocks", "pk_news", "psx_ipos", "psx_fundamentals"]
+    if light_only:
+        pipeline = ["fx_gold", "sbp_macro", "psx_intraday", "crypto_spot", "pk_news", "psx_ipos"]
+    else:
+        pipeline = ["fx_gold", "sbp_macro", "psx_intraday", "crypto_spot", "mufap_nav", "intl_stocks", "pk_news", "psx_ipos", "psx_fundamentals"]
     if include_eod:
         pipeline.append("psx_eod_history")
     if include_deep_backfill:
@@ -79,6 +84,7 @@ async def sync_all_live_sources(
             runs.append(run)
         except Exception as exc:
             logger.warning("Live sync step '%s' encountered an error: %s", name, exc)
+    api_cache.invalidate_prefix("")
     try:
         async with async_session_factory() as db:
             await apply_rls_context(db, bypass=True)
@@ -99,6 +105,7 @@ async def run_scraper_by_name(scraper_name: str, existing_run_id: str | None = N
         await apply_rls_context(db, bypass=True)
         if not existing_run_id:
             run = await scraper.execute_with_telemetry(db, use_lock=False)
+            api_cache.invalidate_prefix("")
             if evaluate_after and scraper_name in {"psx_intraday", "psx_fundamentals", "crypto_spot", "fx_gold"}:
                 await evaluate_alerts(db)
             return run
@@ -108,6 +115,7 @@ async def run_scraper_by_name(scraper_name: str, existing_run_id: str | None = N
         ).scalar_one_or_none()
         if run_log is None:
             run = await scraper.execute_with_telemetry(db, use_lock=False)
+            api_cache.invalidate_prefix("")
             if evaluate_after and scraper_name in {"psx_intraday", "psx_fundamentals", "crypto_spot", "fx_gold"}:
                 await evaluate_alerts(db)
             return run
@@ -122,6 +130,7 @@ async def run_scraper_by_name(scraper_name: str, existing_run_id: str | None = N
             count = await scraper.run(db)
             run_log.status = "SUCCESS"
             run_log.records_upserted = count
+            api_cache.invalidate_prefix("")
             if evaluate_after and scraper_name in {"psx_intraday", "psx_fundamentals", "crypto_spot", "fx_gold"}:
                 await evaluate_alerts(db)
         except ScraperParseError as exc:

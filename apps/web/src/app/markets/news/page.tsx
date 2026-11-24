@@ -1,9 +1,11 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { ExternalLink, Newspaper, RefreshCw, Search } from "lucide-react";
-import { apiFetch } from "@/lib/api";
+import { ExternalLink, Newspaper, RefreshCw, Search, X } from "lucide-react";
+import { CardListSkeleton } from "@/components/Skeletons";
+import { TickerAutocomplete } from "@/components/TickerAutocomplete";
+import { apiFetch, apiFetchCached, invalidateApiCache } from "@/lib/api";
 
 interface NewsItem {
   id: string;
@@ -44,37 +46,61 @@ export default function PakistanNewsHubPage() {
     }
   }, []);
 
-  const fetchNews = useCallback(async () => {
+  const fetchNews = useCallback(async (forceRefresh = false) => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ limit: "80" });
-      if (source !== "ALL") params.set("source", source);
-      if (category !== "ALL") params.set("category", category);
-      if (sector !== "ALL") params.set("sector", sector);
-      if (symbol.trim()) params.set("symbol", symbol.trim().toUpperCase());
-      if (q.trim()) params.set("q", q.trim());
-      const res = await apiFetch<NewsPayload>(`/api/v1/market/news?${params.toString()}`);
+      const res = await apiFetchCached<NewsPayload>("/api/v1/market/news?limit=150", 60_000, {
+        forceRefresh,
+        onUpdate: setData,
+      });
       setData(res);
     } catch {
       setData(null);
     } finally {
       setLoading(false);
     }
-  }, [source, category, sector, symbol, q]);
+  }, []);
 
   useEffect(() => {
-    fetchNews();
+    fetchNews(false);
   }, [fetchNews]);
 
   const handleRefreshFeeds = async () => {
     setRefreshing(true);
     try {
       await apiFetch("/api/v1/market/news/refresh", { method: "POST" });
-      await fetchNews();
+      invalidateApiCache("/api/v1/market/news");
+      await fetchNews(true);
     } finally {
       setRefreshing(false);
     }
   };
+
+  // Instant 0ms client-side filtering across all loaded articles
+  const filteredItems = useMemo(() => {
+    const items = data?.items || [];
+    const qLow = q.trim().toLowerCase();
+    const symUp = symbol.trim().toUpperCase();
+    const secLow = sector !== "ALL" ? sector.toLowerCase() : "";
+    const srcLow = source !== "ALL" ? source.toLowerCase() : "";
+    const catLow = category !== "ALL" ? category.toLowerCase() : "";
+
+    return items.filter((art) => {
+      if (srcLow && art.source_key.toLowerCase() !== srcLow) return false;
+      if (catLow && art.category.toLowerCase() !== catLow) return false;
+      if (symUp) {
+        const hitSym =
+          art.matched_symbols.some((s) => s.toUpperCase() === symUp) ||
+          art.title.toUpperCase().includes(symUp);
+        if (!hitSym) return false;
+      }
+      if (secLow && !art.matched_sectors.some((s) => s.toLowerCase().includes(secLow))) return false;
+      if (qLow && !art.title.toLowerCase().includes(qLow) && !(art.summary || "").toLowerCase().includes(qLow)) {
+        return false;
+      }
+      return true;
+    });
+  }, [data, source, category, sector, symbol, q]);
 
   return (
     <div className="space-y-6">
@@ -103,19 +129,30 @@ export default function PakistanNewsHubPage() {
       <div className="okz-card p-4 space-y-3 text-xs">
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative flex-1 min-w-52">
-            <Search className="w-3.5 h-3.5 okz-muted absolute left-3 top-1/2 -translate-y-1/2" />
+            <Search className="w-3.5 h-3.5 okz-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Search headlines (SBP, IMF, cement, circular debt, dividend)..."
-              className="w-full pl-8 pr-3 py-1.5 rounded-md border border-[var(--border)] bg-[var(--bg)] text-xs"
+              placeholder="Instant filter headlines (SBP, IMF, cement, circular debt, dividend)..."
+              className="w-full pl-8 pr-7 py-1.5 rounded-md border border-[var(--border)] bg-[var(--bg)] text-xs"
             />
+            {q && (
+              <button
+                type="button"
+                onClick={() => setQ("")}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 okz-muted hover:text-[var(--text)]"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
-          <input
+          <TickerAutocomplete
             value={symbol}
-            onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-            placeholder="Ticker (e.g. MEBL)"
-            className="w-32 px-3 py-1.5 rounded-md border border-[var(--border)] bg-[var(--bg)] font-mono uppercase text-xs"
+            onChange={(val) => setSymbol(val.toUpperCase())}
+            onSelect={(item) => setSymbol(item.symbol)}
+            placeholder="Ticker (e.g. MEBL)..."
+            className="w-44"
           />
           <select
             value={sector}
@@ -176,14 +213,14 @@ export default function PakistanNewsHubPage() {
 
       {/* Articles Grid */}
       {loading && !data ? (
-        <div className="okz-card p-8 text-center text-sm okz-muted">Loading Pakistan financial news...</div>
-      ) : !data || data.items.length === 0 ? (
+        <CardListSkeleton count={6} cols="grid-cols-1 md:grid-cols-2" />
+      ) : filteredItems.length === 0 ? (
         <div className="okz-card p-8 text-center text-sm okz-muted">
           No news articles matched your filters. Clear filters or click &ldquo;Refresh Live Feeds&rdquo;.
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {data.items.map((art) => (
+          {filteredItems.map((art) => (
             <article key={art.id} className="okz-card p-5 flex flex-col justify-between gap-3 hover:border-emerald-500/40 transition">
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2 text-[11px]">

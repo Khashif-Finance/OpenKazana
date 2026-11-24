@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -31,8 +31,45 @@ import {
   TrendingUp,
   X,
 } from "lucide-react";
-import { apiFetch } from "@/lib/api";
+import {
+  apiFetchCached,
+  AssetIndexItem,
+  filterAssetIndex,
+  getAssetIndex,
+} from "@/lib/api";
 import { useAppContext } from "./CurrencyContext";
+
+function computePsxMarketStatus(): { isOpen: boolean; label: string; pktTime: string } {
+  try {
+    const now = new Date();
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Karachi",
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(now);
+    const wd = parts.find((p) => p.type === "weekday")?.value || "Mon";
+    const hh = Number(parts.find((p) => p.type === "hour")?.value || "0");
+    const mm = Number(parts.find((p) => p.type === "minute")?.value || "0");
+    const mins = hh * 60 + mm;
+    const pktTime = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")} PKT`;
+
+    if (wd === "Sat" || wd === "Sun") {
+      return { isOpen: false, label: "PSX CLOSED", pktTime };
+    }
+    if (wd === "Fri") {
+      // Official PSX Friday dual session: 09:15-12:00 & 14:30-16:30 PKT
+      const open = (mins >= 9 * 60 + 15 && mins <= 12 * 60) || (mins >= 14 * 60 + 30 && mins <= 16 * 60 + 30);
+      return { isOpen: open, label: open ? "PSX OPEN" : "PSX CLOSED", pktTime };
+    }
+    // Official PSX Mon-Thu regular session: 09:30-15:30 PKT
+    const open = mins >= 9 * 60 + 30 && mins <= 15 * 60 + 30;
+    return { isOpen: open, label: open ? "PSX OPEN" : "PSX CLOSED", pktTime };
+  } catch {
+    return { isOpen: false, label: "PSX", pktTime: "PKT" };
+  }
+}
 
 interface NavSubItem {
   href: string;
@@ -110,17 +147,6 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ];
 
-interface SearchAssetItem {
-  id: string;
-  symbol: string;
-  name: string;
-  asset_class: string;
-  currency: string;
-  last_price: string;
-  change_pct: string;
-  is_shariah_compliant: boolean;
-}
-
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -140,21 +166,29 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileExpanded, setMobileExpanded] = useState<string | null>("markets");
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<SearchAssetItem[]>([]);
-  const [searching, setSearching] = useState(false);
+  const [assetIndex, setAssetIndex] = useState<AssetIndexItem[]>([]);
+  const [indexLoading, setIndexLoading] = useState(false);
+  const [activeSearchIdx, setActiveSearchIdx] = useState(0);
+  const [psxClock, setPsxClock] = useState<{ isOpen: boolean; label: string; pktTime: string } | null>(null);
   const [tickerItems, setTickerItems] = useState<
     Array<{ symbol: string; last_price: string; change_pct: string; asset_class: string }>
   >([]);
   const navRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    apiFetch<{
+    setPsxClock(computePsxMarketStatus());
+    const id = window.setInterval(() => setPsxClock(computePsxMarketStatus()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    apiFetchCached<{
       indices: Array<{ symbol: string; last_price: string; change_pct: string; asset_class: string }>;
       fx_rates: Array<{ symbol: string; last_price: string; change_pct: string; asset_class: string }>;
       gold_rates: Array<{ symbol: string; last_price: string; change_pct: string; asset_class: string }>;
       crypto_rates: Array<{ symbol: string; last_price: string; change_pct: string; asset_class: string }>;
       top_gainers: Array<{ symbol: string; last_price: string; change_pct: string; asset_class: string }>;
-    }>("/api/v1/market/overview")
+    }>("/api/v1/market/overview", 60_000)
       .then((res) => {
         const items = [
           ...(res.indices || []).slice(0, 3),
@@ -165,6 +199,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         ];
         setTickerItems(items);
       })
+      .catch(() => {});
+
+    // Preload compact 874-asset catalog once per session for <1ms ⌘K & autocomplete
+    getAssetIndex()
+      .then(setAssetIndex)
       .catch(() => {});
   }, []);
 
@@ -197,28 +236,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!searchOpen) return;
-    let active = true;
-    setSearching(true);
-    const timer = setTimeout(async () => {
-      try {
-        const res = await apiFetch<SearchAssetItem[]>(
-          `/api/v1/market/assets?q=${encodeURIComponent(searchQuery)}&limit=12`,
-        );
-        if (active) setSearchResults(res);
-      } catch {
-        if (active) setSearchResults([]);
-      } finally {
-        if (active) setSearching(false);
-      }
-    }, 180);
-    return () => {
-      active = false;
-      clearTimeout(timer);
-    };
+    if (!searchOpen || assetIndex.length > 0) return;
+    setIndexLoading(true);
+    getAssetIndex()
+      .then(setAssetIndex)
+      .catch(() => {})
+      .finally(() => setIndexLoading(false));
+  }, [searchOpen, assetIndex.length]);
+
+  const searchResults = useMemo(
+    () => filterAssetIndex(assetIndex, searchQuery, { limit: 15 }),
+    [assetIndex, searchQuery],
+  );
+
+  useEffect(() => {
+    setActiveSearchIdx(0);
   }, [searchQuery, searchOpen]);
 
-  const navigateAsset = (item: SearchAssetItem) => {
+  const navigateAsset = (item: AssetIndexItem) => {
     setSearchOpen(false);
     setSearchQuery("");
     if (
@@ -354,9 +389,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
 
           <div className="flex items-center gap-2">
+            {psxClock && (
+              <span
+                title={`Pakistan Stock Exchange live clock (${psxClock.pktTime}) — Mon-Thu 09:30-15:30, Fri 09:15-12:00 & 14:30-16:30 PKT`}
+                className={`hidden xl:inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-[11px] font-mono ${
+                  psxClock.isOpen
+                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+                    : "border-[var(--border)] bg-[var(--card-muted)]/60 okz-muted"
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    psxClock.isOpen ? "bg-emerald-400 animate-pulse" : "bg-slate-500"
+                  }`}
+                />
+                <span className="font-semibold">{psxClock.label}</span>
+                <span className="opacity-75">· {psxClock.pktTime}</span>
+              </span>
+            )}
+
             <button
               onClick={() => setSearchOpen(true)}
-              title="Global asset search (Ctrl+K / Cmd+K)"
+              title="Instant asset search across 870+ assets (Ctrl+K / Cmd+K)"
               className="hidden sm:inline-flex items-center gap-2 px-2.5 py-1.5 rounded-md border border-[var(--border)] text-xs okz-muted hover:text-[var(--text)] hover:bg-[var(--card-muted)] transition"
             >
               <Search className="w-3.5 h-3.5" />
@@ -537,34 +591,62 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         >
           <div className="okz-card w-full max-w-xl overflow-hidden shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border)]">
-              <Search className="w-4 h-4 okz-muted" />
+              <Search className="w-4 h-4 okz-muted shrink-0" />
               <input
                 autoFocus
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search PSX symbols (MEBL, OGDC, LUCK), Mutual Funds, Gold, Crypto..."
+                onKeyDown={(e) => {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setActiveSearchIdx((prev) => (searchResults.length > 0 ? (prev + 1) % searchResults.length : 0));
+                  } else if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setActiveSearchIdx((prev) =>
+                      searchResults.length > 0 ? (prev - 1 + searchResults.length) % searchResults.length : 0,
+                    );
+                  } else if (e.key === "Enter" && searchResults.length > 0) {
+                    e.preventDefault();
+                    navigateAsset(searchResults[Math.min(activeSearchIdx, searchResults.length - 1)]);
+                  }
+                }}
+                placeholder="Type symbol, company, fund, or sector (e.g. MEBL, Meezan, Cement, MIF)..."
                 className="w-full bg-transparent text-sm focus:outline-none"
               />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  aria-label="Clear search"
+                  className="p-0.5 okz-muted hover:text-[var(--text)]"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
               <button onClick={() => setSearchOpen(false)} className="text-xs okz-muted hover:text-[var(--text)]">
                 ESC
               </button>
             </div>
             <div className="max-h-80 overflow-y-auto divide-y divide-[var(--border)]">
-              {searching && <div className="p-4 text-xs okz-muted">Searching assets...</div>}
-              {!searching && searchResults.length === 0 && (
-                <div className="p-4 text-xs okz-muted">No matching assets found.</div>
+              {indexLoading && <div className="p-4 text-xs okz-muted">Loading market catalog...</div>}
+              {!indexLoading && searchResults.length === 0 && (
+                <div className="p-4 text-xs okz-muted">No matching assets found for &ldquo;{searchQuery}&rdquo;.</div>
               )}
-              {searchResults.map((item) => {
-                const chg = Number(item.change_pct);
+              {searchResults.map((item, idx) => {
+                const chg = Number(item.change_pct || 0);
+                const isSelected = idx === activeSearchIdx;
                 return (
                   <button
-                    key={item.id}
+                    key={`${item.asset_class}-${item.symbol}`}
+                    onMouseEnter={() => setActiveSearchIdx(idx)}
                     onClick={() => navigateAsset(item)}
-                    className="w-full px-4 py-2.5 text-left flex items-center justify-between gap-3 hover:bg-[var(--card-muted)] transition"
+                    className={`w-full px-4 py-2.5 text-left flex items-center justify-between gap-3 transition ${
+                      isSelected ? "bg-emerald-500/15" : "hover:bg-[var(--card-muted)]"
+                    }`}
                   >
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
-                        <span className="font-bold text-sm">{item.symbol}</span>
+                        <span className="font-bold text-sm font-mono">{item.symbol}</span>
                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--card-muted)] okz-muted">
                           {item.asset_class}
                         </span>
@@ -574,13 +656,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                           </span>
                         )}
                       </div>
-                      <div className="text-xs okz-muted truncate">{item.name}</div>
+                      <div className="text-xs okz-muted truncate">
+                        {item.name}
+                        {item.sector_or_category ? ` · ${item.sector_or_category}` : ""}
+                      </div>
                     </div>
                     <div className="text-right shrink-0">
-                      <div className="text-sm font-semibold tabular-nums">
-                        {item.currency} {Number(item.last_price).toLocaleString()}
+                      <div className="text-sm font-semibold tabular-nums font-mono">
+                        {item.currency} {Number(item.last_price).toLocaleString(undefined, { maximumFractionDigits: 2 })}
                       </div>
-                      <div className={`text-xs tabular-nums ${chg >= 0 ? "okz-pos" : "okz-neg"}`}>
+                      <div className={`text-xs tabular-nums font-mono ${chg >= 0 ? "okz-pos" : "okz-neg"}`}>
                         {chg >= 0 ? "+" : ""}
                         {chg.toFixed(2)}%
                       </div>
@@ -588,6 +673,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   </button>
                 );
               })}
+            </div>
+            <div className="px-4 py-2 border-t border-[var(--border)] bg-[var(--bg-elevated)]/60 flex items-center justify-between text-[10px] okz-muted">
+              <span>{assetIndex.length.toLocaleString()} indexed assets · Instant local match</span>
+              <span>↑↓ navigate · ↵ open · ESC close</span>
             </div>
           </div>
         </div>

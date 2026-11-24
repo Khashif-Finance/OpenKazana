@@ -10,6 +10,7 @@ OpenKhazana v6 Market Hub API Router:
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -25,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_optional_user, resolve_asset_by_symbol
+from app.core.cache import api_cache
 from app.core.database import get_db
 from app.models.market import (
     Announcement,
@@ -119,6 +121,18 @@ def _serialize_news(art: NewsArticle) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+async def _get_recent_news_cached(db: AsyncSession) -> list[dict[str, Any]]:
+    async def _load() -> list[dict[str, Any]]:
+        rows = (
+            await db.execute(
+                select(NewsArticle).order_by(NewsArticle.published_at.desc()).limit(350)
+            )
+        ).scalars().all()
+        return [_serialize_news(art) for art in rows]
+
+    return await api_cache.get_or_set("news:recent_350", 60.0, _load)
+
+
 @router.get("/news")
 async def list_market_news(
     symbol: str | None = Query(default=None),
@@ -130,11 +144,7 @@ async def list_market_news(
     db: AsyncSession = Depends(get_db),
 ):
     """Browse aggregated Pakistan financial news with symbol, sector, source, category, and keyword filters."""
-    rows = (
-        await db.execute(
-            select(NewsArticle).order_by(NewsArticle.published_at.desc()).limit(350)
-        )
-    ).scalars().all()
+    rows = await _get_recent_news_cached(db)
 
     sym_u = symbol.strip().upper() if symbol and symbol.strip() else None
     sec_l = sector.strip().lower() if sector and sector.strip() and sector.upper() != "ALL" else None
@@ -149,29 +159,30 @@ async def list_market_news(
 
     for art in rows:
         sc = source_counts.setdefault(
-            art.source_key,
-            {"source_key": art.source_key, "source_name": art.source_name, "count": 0},
+            art["source_key"],
+            {"source_key": art["source_key"], "source_name": art["source_name"], "count": 0},
         )
         sc["count"] += 1
-        category_counts[art.category] = category_counts.get(art.category, 0) + 1
-        for s in (art.matched_sectors_json or []):
+        cat_val = art["category"]
+        category_counts[cat_val] = category_counts.get(cat_val, 0) + 1
+        for s in art["matched_sectors"]:
             sector_counts[s] = sector_counts.get(s, 0) + 1
 
-        if src_l and art.source_key.lower() != src_l:
+        if src_l and art["source_key"].lower() != src_l:
             continue
-        if cat_l and art.category.lower() != cat_l:
+        if cat_l and cat_val.lower() != cat_l:
             continue
         if sym_u:
-            syms = [str(x).upper() for x in (art.matched_symbols_json or [])]
-            if sym_u not in syms and sym_u not in art.title.upper():
+            syms = [str(x).upper() for x in art["matched_symbols"]]
+            if sym_u not in syms and sym_u not in art["title"].upper():
                 continue
         if sec_l:
-            secs = [str(x).lower() for x in (art.matched_sectors_json or [])]
+            secs = [str(x).lower() for x in art["matched_sectors"]]
             if not any(sec_l in s for s in secs):
                 continue
-        if q_l and q_l not in art.title.lower() and q_l not in (art.summary or "").lower():
+        if q_l and q_l not in art["title"].lower() and q_l not in (art["summary"] or "").lower():
             continue
-        filtered.append(_serialize_news(art))
+        filtered.append(art)
 
     top_sectors = sorted(sector_counts.items(), key=lambda kv: kv[1], reverse=True)[:20]
     return {
@@ -195,11 +206,7 @@ async def stock_and_sector_news(
     if asset is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Asset '{symbol}' not found.")
 
-    rows = (
-        await db.execute(
-            select(NewsArticle).order_by(NewsArticle.published_at.desc()).limit(350)
-        )
-    ).scalars().all()
+    rows = await _get_recent_news_cached(db)
 
     sym_u = asset.symbol.upper()
     name_stem = re.sub(r"\b(limited|ltd\.?|company|corporation|pakistan)\b", "", asset.name.lower()).strip()
@@ -210,18 +217,18 @@ async def stock_and_sector_news(
     seen_ids: set[str] = set()
 
     for art in rows:
-        syms = [str(x).upper() for x in (art.matched_symbols_json or [])]
-        title_low = art.title.lower()
+        syms = [str(x).upper() for x in art["matched_symbols"]]
+        title_low = art["title"].lower()
         is_stock_match = sym_u in syms or (len(name_stem) >= 6 and name_stem in title_low)
         if is_stock_match:
-            stock_news.append(_serialize_news(art))
-            seen_ids.add(art.id)
+            stock_news.append(art)
+            seen_ids.add(art["id"])
             continue
 
-        secs = [str(x).upper() for x in (art.matched_sectors_json or [])]
+        secs = [str(x).upper() for x in art["matched_sectors"]]
         if sec_u and any(sec_u == s or sec_u in s or s in sec_u for s in secs):
-            if art.id not in seen_ids:
-                sector_news.append(_serialize_news(art))
+            if art["id"] not in seen_ids:
+                sector_news.append(art)
 
     return {
         "symbol": asset.symbol,
@@ -236,6 +243,8 @@ async def stock_and_sector_news(
 async def refresh_market_news(db: AsyncSession = Depends(get_db)):
     """Trigger an immediate live RSS refresh across Pakistan financial news publications."""
     added = await PakistanNewsScraper().run(db)
+    api_cache.invalidate_prefix("news:")
+    api_cache.invalidate_prefix("ipos:")
     return {"ok": True, "articles_added": added}
 
 
@@ -251,137 +260,139 @@ async def list_ipos_and_developments(
     db: AsyncSession = Depends(get_db),
 ):
     """Return PSX Main & GEM Board IPOs with live post-IPO return tracking, IPO news, official guides & PUCARS developments."""
-    ipo_rows = (await db.execute(select(IpoListing))).scalars().all()
-    if not ipo_rows:
-        await PsxIpoAndListingsScraper().run(db)
+    async def _load_base() -> dict[str, Any]:
         ipo_rows = (await db.execute(select(IpoListing))).scalars().all()
+        if not ipo_rows:
+            await PsxIpoAndListingsScraper().run(db)
+            ipo_rows = (await db.execute(select(IpoListing))).scalars().all()
 
-    syms = [r.symbol.upper() for r in ipo_rows if r.symbol]
-    live_assets: dict[str, Asset] = {}
-    if syms:
-        asset_rows = (
+        syms = [r.symbol.upper() for r in ipo_rows if r.symbol]
+        live_assets: dict[str, Asset] = {}
+        if syms:
+            asset_rows = (
+                await db.execute(
+                    select(Asset)
+                    .options(selectinload(Asset.psx_profile))
+                    .where(Asset.owner_user_id.is_(None), Asset.symbol.in_(syms))
+                )
+            ).scalars().all()
+            live_assets = {a.symbol.upper(): a for a in asset_rows}
+
+        status_rank = {"OPEN": 0, "BOOK_BUILDING": 1, "UPCOMING": 2, "LISTED": 3}
+        enriched_ipos: list[dict[str, Any]] = []
+        for r in ipo_rows:
+            asset = live_assets.get(r.symbol.upper()) if r.symbol else None
+            live_px = _safe_float(asset.last_price) if asset and float(asset.last_price) > 0 else None
+            live_chg = _safe_float(asset.change_pct) if asset else None
+            strike = _safe_float(r.strike_price) or _safe_float(r.floor_price)
+            post_ret = round(((live_px - strike) / strike) * 100.0, 2) if (live_px and strike and strike > 0) else None
+            sub_m = _safe_float(r.subscription_multiple)
+            enriched_ipos.append(
+                {
+                    "id": r.id,
+                    "slug": r.slug,
+                    "company_name": r.company_name,
+                    "symbol": r.symbol,
+                    "sector": r.sector,
+                    "board": r.board,
+                    "status": r.status,
+                    "issue_type": r.issue_type,
+                    "floor_price": _safe_float(r.floor_price),
+                    "strike_price": _safe_float(r.strike_price),
+                    "issue_size_mn": _safe_float(r.issue_size_mn),
+                    "subscription_multiple": sub_m,
+                    "book_building_date": r.book_building_date.isoformat() if r.book_building_date else None,
+                    "listing_date": r.listing_date.isoformat() if r.listing_date else None,
+                    "lead_manager": r.lead_manager,
+                    "prospectus_url": r.prospectus_url,
+                    "source_url": r.source_url,
+                    "summary": r.summary,
+                    "is_shariah_compliant": asset.is_shariah_compliant if asset else r.is_shariah_compliant,
+                    "live_price": live_px,
+                    "live_change_pct": live_chg,
+                    "market_cap_mn": _safe_float(asset.psx_profile.market_cap_mn) if asset and asset.psx_profile else None,
+                    "post_ipo_return_pct": post_ret,
+                    "in_database": asset is not None,
+                }
+            )
+
+        enriched_ipos.sort(
+            key=lambda x: (
+                status_rank.get(x["status"], 9),
+                -(date.fromisoformat(x["listing_date"]).toordinal() if x["listing_date"] else 0),
+            )
+        )
+
+        ann_rows = (
             await db.execute(
-                select(Asset)
-                .options(selectinload(Asset.psx_profile))
-                .where(Asset.owner_user_id.is_(None), Asset.symbol.in_(syms))
+                select(Announcement, Asset)
+                .join(Asset, Announcement.asset_id == Asset.id)
+                .where(Asset.owner_user_id.is_(None))
+                .order_by(Announcement.published_at.desc())
+                .limit(45)
+            )
+        ).all()
+        developments = [
+            {
+                "id": ann.id,
+                "symbol": asset.symbol,
+                "company_name": asset.name,
+                "sector": asset.sector_or_category,
+                "title": ann.title,
+                "category": ann.category,
+                "doc_type": _classify_download_category(ann.title, ann.category),
+                "published_at": ann.published_at.isoformat(),
+                "source_url": ann.source_url,
+                "summary": ann.summary,
+            }
+            for ann, asset in ann_rows
+        ]
+
+        ipo_news_rows = (
+            await db.execute(
+                select(NewsArticle)
+                .where(
+                    (NewsArticle.category == "IPO")
+                    | (NewsArticle.title.ilike("%ipo%"))
+                    | (NewsArticle.title.ilike("%listing%"))
+                    | (NewsArticle.title.ilike("%psx%"))
+                )
+                .order_by(NewsArticle.published_at.desc())
+                .limit(15)
             )
         ).scalars().all()
-        live_assets = {a.symbol.upper(): a for a in asset_rows}
 
+        return {
+            "ipos": enriched_ipos,
+            "developments": developments,
+            "ipo_news": [_serialize_news(n) for n in ipo_news_rows],
+            "guides": PSX_IPO_GUIDES,
+        }
+
+    base = await api_cache.get_or_set("ipos:base", 180.0, _load_base)
     b_up = board.strip().upper()
     s_up = status_filter.strip().upper()
-    status_rank = {"OPEN": 0, "BOOK_BUILDING": 1, "UPCOMING": 2, "LISTED": 3}
-
-    enriched_ipos: list[dict[str, Any]] = []
-    post_ipo_returns: list[float] = []
-    oversubs: list[float] = []
-
-    for r in ipo_rows:
-        if b_up != "ALL" and r.board.upper() != b_up:
-            continue
-        if s_up != "ALL" and r.status.upper() != s_up:
-            continue
-        asset = live_assets.get(r.symbol.upper()) if r.symbol else None
-        live_px = _safe_float(asset.last_price) if asset and float(asset.last_price) > 0 else None
-        live_chg = _safe_float(asset.change_pct) if asset else None
-        strike = _safe_float(r.strike_price) or _safe_float(r.floor_price)
-        post_ret = round(((live_px - strike) / strike) * 100.0, 2) if (live_px and strike and strike > 0) else None
-        if post_ret is not None:
-            post_ipo_returns.append(post_ret)
-        sub_m = _safe_float(r.subscription_multiple)
-        if sub_m is not None:
-            oversubs.append(sub_m)
-
-        enriched_ipos.append(
-            {
-                "id": r.id,
-                "slug": r.slug,
-                "company_name": r.company_name,
-                "symbol": r.symbol,
-                "sector": r.sector,
-                "board": r.board,
-                "status": r.status,
-                "issue_type": r.issue_type,
-                "floor_price": _safe_float(r.floor_price),
-                "strike_price": _safe_float(r.strike_price),
-                "issue_size_mn": _safe_float(r.issue_size_mn),
-                "subscription_multiple": sub_m,
-                "book_building_date": r.book_building_date.isoformat() if r.book_building_date else None,
-                "listing_date": r.listing_date.isoformat() if r.listing_date else None,
-                "lead_manager": r.lead_manager,
-                "prospectus_url": r.prospectus_url,
-                "source_url": r.source_url,
-                "summary": r.summary,
-                "is_shariah_compliant": asset.is_shariah_compliant if asset else r.is_shariah_compliant,
-                "live_price": live_px,
-                "live_change_pct": live_chg,
-                "market_cap_mn": _safe_float(asset.psx_profile.market_cap_mn) if asset and asset.psx_profile else None,
-                "post_ipo_return_pct": post_ret,
-                "in_database": asset is not None,
-            }
-        )
-
-    enriched_ipos.sort(
-        key=lambda x: (
-            status_rank.get(x["status"], 9),
-            -(date.fromisoformat(x["listing_date"]).toordinal() if x["listing_date"] else 0),
-        )
-    )
-
-    # Latest PUCARS corporate developments (material info, dividends, results, board meetings)
-    ann_rows = (
-        await db.execute(
-            select(Announcement, Asset)
-            .join(Asset, Announcement.asset_id == Asset.id)
-            .where(Asset.owner_user_id.is_(None))
-            .order_by(Announcement.published_at.desc())
-            .limit(45)
-        )
-    ).all()
-    developments = [
-        {
-            "id": ann.id,
-            "symbol": asset.symbol,
-            "company_name": asset.name,
-            "sector": asset.sector_or_category,
-            "title": ann.title,
-            "category": ann.category,
-            "doc_type": _classify_download_category(ann.title, ann.category),
-            "published_at": ann.published_at.isoformat(),
-            "source_url": ann.source_url,
-            "summary": ann.summary,
-        }
-        for ann, asset in ann_rows
+    filtered_ipos = [
+        x
+        for x in base["ipos"]
+        if (b_up == "ALL" or x["board"].upper() == b_up)
+        and (s_up == "ALL" or x["status"].upper() == s_up)
     ]
-
-    # IPO & listing tagged news
-    ipo_news_rows = (
-        await db.execute(
-            select(NewsArticle)
-            .where(
-                (NewsArticle.category == "IPO")
-                | (NewsArticle.title.ilike("%ipo%"))
-                | (NewsArticle.title.ilike("%listing%"))
-                | (NewsArticle.title.ilike("%psx%"))
-            )
-            .order_by(NewsArticle.published_at.desc())
-            .limit(15)
-        )
-    ).scalars().all()
-
+    post_ipo_returns = [x["post_ipo_return_pct"] for x in filtered_ipos if x["post_ipo_return_pct"] is not None]
+    oversubs = [x["subscription_multiple"] for x in filtered_ipos if x["subscription_multiple"] is not None]
     return {
         "summary": {
-            "total_tracked": len(enriched_ipos),
-            "main_board_count": sum(1 for x in enriched_ipos if x["board"] == "MAIN"),
-            "gem_board_count": sum(1 for x in enriched_ipos if x["board"] == "GEM"),
-            "upcoming_count": sum(1 for x in enriched_ipos if x["status"] in {"UPCOMING", "OPEN", "BOOK_BUILDING"}),
+            "total_tracked": len(filtered_ipos),
+            "main_board_count": sum(1 for x in filtered_ipos if x["board"] == "MAIN"),
+            "gem_board_count": sum(1 for x in filtered_ipos if x["board"] == "GEM"),
+            "upcoming_count": sum(1 for x in filtered_ipos if x["status"] in {"UPCOMING", "OPEN", "BOOK_BUILDING"}),
             "avg_oversubscription_x": round(sum(oversubs) / len(oversubs), 2) if oversubs else None,
             "avg_post_ipo_return_pct": round(sum(post_ipo_returns) / len(post_ipo_returns), 2) if post_ipo_returns else None,
         },
-        "ipos": enriched_ipos,
-        "developments": developments,
-        "ipo_news": [_serialize_news(n) for n in ipo_news_rows],
-        "guides": PSX_IPO_GUIDES,
+        "ipos": filtered_ipos,
+        "developments": base["developments"],
+        "ipo_news": base["ipo_news"],
+        "guides": base["guides"],
     }
 
 
@@ -390,84 +401,13 @@ async def list_ipos_and_developments(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/sectors")
-async def sector_industry_explorer(
-    market: str = Query(default="PSX", description="PSX | INTL | ALL"),
-    shariah_only: bool = Query(default=False),
-    q: str = Query(default=""),
-    db: AsyncSession = Depends(get_db),
-):
-    """Aggregate all 37 PSX sectors (or Global sectors) with Pandas medians, cap-weighted 1D return, breadth & constituent drilldowns."""
-    m_up = market.strip().upper()
-    if m_up == "PSX":
-        classes = ["PSX_EQUITY", "PSX_ETF"]
-    elif m_up in {"INTL", "GLOBAL"}:
-        classes = ["INTL_EQUITY", "INTL_ETF"]
-    else:
-        classes = ["PSX_EQUITY", "PSX_ETF", "INTL_EQUITY", "INTL_ETF"]
-
-    stmt = (
-        select(Asset)
-        .options(selectinload(Asset.psx_profile), selectinload(Asset.financial_snapshot))
-        .where(Asset.owner_user_id.is_(None), Asset.asset_class.in_(classes))
-    )
-    if shariah_only:
-        stmt = stmt.where(Asset.is_shariah_compliant.is_(True))
-    assets = (await db.execute(stmt)).scalars().all()
-
-    q_l = q.strip().lower()
-    records: list[dict[str, Any]] = []
-    for a in assets:
-        p = a.psx_profile
-        fs = a.financial_snapshot
-        sec = (a.sector_or_category or "General").strip() or "General"
-        mcap = float(p.market_cap_mn) if p and p.market_cap_mn and float(p.market_cap_mn) > 0 else 0.0
-        pe = float(p.pe_ratio) if p and p.pe_ratio and 0 < float(p.pe_ratio) < 150 else np.nan
-        pb = float(p.pb_ratio) if p and p.pb_ratio and 0 < float(p.pb_ratio) < 40 else np.nan
-        if math.isnan(pb) and fs and fs.bvps and float(fs.bvps) > 0 and float(a.last_price) > 0:
-            pb = float(a.last_price) / float(fs.bvps)
-        roe = (
-            float(fs.roe_pct)
-            if fs and fs.roe_pct is not None and -100 < float(fs.roe_pct) < 250
-            else (float(p.roe_pct) if p and p.roe_pct is not None and -100 < float(p.roe_pct) < 250 else np.nan)
-        )
-        dy = float(p.dividend_yield_pct) if p and p.dividend_yield_pct and float(p.dividend_yield_pct) > 0 else np.nan
-        records.append(
-            {
-                "symbol": a.symbol,
-                "name": a.name,
-                "sector": sec,
-                "currency": a.currency,
-                "is_shariah_compliant": bool(a.is_shariah_compliant),
-                "is_kse100": bool(p.is_kse100) if p else False,
-                "is_kmi30": bool(p.is_kmi30) if p else False,
-                "last_price": float(a.last_price),
-                "change_pct": float(a.change_pct),
-                "volume": float(a.volume),
-                "market_cap_mn": mcap,
-                "pe_ratio": pe,
-                "pb_ratio": pb,
-                "roe_pct": roe,
-                "dividend_yield_pct": dy,
-                "piotroski_f_score": float(fs.piotroski_f_score) if fs and fs.piotroski_f_score is not None else np.nan,
-            }
-        )
-
+def _aggregate_sectors_pandas_sync(records: list[dict[str, Any]], m_up: str) -> dict[str, Any]:
     if not records:
-        return {"market": m_up, "sector_count": 0, "total_stocks": 0, "sectors": []}
+        return {"market": m_up, "sector_count": 0, "total_stocks": 0, "total_market_cap_mn": 0.0, "sectors": []}
 
     df = pd.DataFrame(records)
     sectors_out: list[dict[str, Any]] = []
     for sec_name, grp in df.groupby("sector", sort=False):
-        if q_l:
-            sec_match = q_l in str(sec_name).lower()
-            if not sec_match:
-                sub = grp[
-                    grp["symbol"].str.lower().str.contains(q_l, regex=False)
-                    | grp["name"].str.lower().str.contains(q_l, regex=False)
-                ]
-                if sub.empty:
-                    continue
         total_mcap = float(grp["market_cap_mn"].sum())
         if total_mcap > 0:
             cap_w_chg = float((grp["change_pct"] * grp["market_cap_mn"]).sum() / total_mcap)
@@ -501,7 +441,7 @@ async def sector_industry_explorer(
                 "is_shariah_compliant": bool(r["is_shariah_compliant"]),
                 "is_kse100": bool(r["is_kse100"]),
             }
-            for _, r in grp_sorted.iterrows()
+            for r in grp_sorted.to_dict(orient="records")
         ]
 
         med_pe = float(grp["pe_ratio"].median()) if grp["pe_ratio"].notna().any() else None
@@ -547,6 +487,90 @@ async def sector_industry_explorer(
         "total_stocks": sum(s["stock_count"] for s in sectors_out),
         "total_market_cap_mn": round(sum(s["total_market_cap_mn"] for s in sectors_out), 1),
         "sectors": sectors_out,
+    }
+
+
+@router.get("/sectors")
+async def sector_industry_explorer(
+    market: str = Query(default="PSX", description="PSX | INTL | ALL"),
+    shariah_only: bool = Query(default=False),
+    q: str = Query(default=""),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregate all PSX sectors (or Global sectors) with Pandas medians, cap-weighted 1D return, breadth & constituent drilldowns."""
+    m_up = market.strip().upper()
+    if m_up == "PSX":
+        classes = ["PSX_EQUITY", "PSX_ETF"]
+    elif m_up in {"INTL", "GLOBAL"}:
+        classes = ["INTL_EQUITY", "INTL_ETF"]
+    else:
+        classes = ["PSX_EQUITY", "PSX_ETF", "INTL_EQUITY", "INTL_ETF"]
+
+    async def _load_base() -> dict[str, Any]:
+        stmt = (
+            select(Asset)
+            .options(selectinload(Asset.psx_profile), selectinload(Asset.financial_snapshot))
+            .where(Asset.owner_user_id.is_(None), Asset.asset_class.in_(classes))
+        )
+        if shariah_only:
+            stmt = stmt.where(Asset.is_shariah_compliant.is_(True))
+        assets = (await db.execute(stmt)).scalars().all()
+
+        records: list[dict[str, Any]] = []
+        for a in assets:
+            p = a.psx_profile
+            fs = a.financial_snapshot
+            sec = (a.sector_or_category or "General").strip() or "General"
+            mcap = float(p.market_cap_mn) if p and p.market_cap_mn and float(p.market_cap_mn) > 0 else 0.0
+            pe = float(p.pe_ratio) if p and p.pe_ratio and 0 < float(p.pe_ratio) < 150 else np.nan
+            pb = float(p.pb_ratio) if p and p.pb_ratio and 0 < float(p.pb_ratio) < 40 else np.nan
+            if math.isnan(pb) and fs and fs.bvps and float(fs.bvps) > 0 and float(a.last_price) > 0:
+                pb = float(a.last_price) / float(fs.bvps)
+            roe = (
+                float(fs.roe_pct)
+                if fs and fs.roe_pct is not None and -100 < float(fs.roe_pct) < 250
+                else (float(p.roe_pct) if p and p.roe_pct is not None and -100 < float(p.roe_pct) < 250 else np.nan)
+            )
+            dy = float(p.dividend_yield_pct) if p and p.dividend_yield_pct and float(p.dividend_yield_pct) > 0 else np.nan
+            records.append(
+                {
+                    "symbol": a.symbol,
+                    "name": a.name,
+                    "sector": sec,
+                    "currency": a.currency,
+                    "is_shariah_compliant": bool(a.is_shariah_compliant),
+                    "is_kse100": bool(p.is_kse100) if p else False,
+                    "is_kmi30": bool(p.is_kmi30) if p else False,
+                    "last_price": float(a.last_price),
+                    "change_pct": float(a.change_pct),
+                    "volume": float(a.volume),
+                    "market_cap_mn": mcap,
+                    "pe_ratio": pe,
+                    "pb_ratio": pb,
+                    "roe_pct": roe,
+                    "dividend_yield_pct": dy,
+                    "piotroski_f_score": float(fs.piotroski_f_score) if fs and fs.piotroski_f_score is not None else np.nan,
+                }
+            )
+        return await asyncio.to_thread(_aggregate_sectors_pandas_sync, records, m_up)
+
+    base = await api_cache.get_or_set(f"sectors:{m_up}:{shariah_only}", 120.0, _load_base)
+    q_l = q.strip().lower()
+    if not q_l:
+        return base
+
+    filtered_secs = [
+        sec
+        for sec in base["sectors"]
+        if q_l in sec["sector"].lower()
+        or any(q_l in st["symbol"].lower() or q_l in st["name"].lower() for st in sec["stocks"])
+    ]
+    return {
+        "market": m_up,
+        "sector_count": len(filtered_secs),
+        "total_stocks": sum(s["stock_count"] for s in filtered_secs),
+        "total_market_cap_mn": round(sum(s["total_market_cap_mn"] for s in filtered_secs), 1),
+        "sectors": filtered_secs,
     }
 
 
@@ -809,6 +833,81 @@ async def corporate_calendar(
     start_date = today - timedelta(days=days_back)
     end_date = today + timedelta(days=days_ahead)
 
+    async def _load_calendar_base() -> list[dict[str, Any]]:
+        base_events: list[dict[str, Any]] = []
+        ca_rows = (
+            await db.execute(
+                select(CorporateAction, Asset)
+                .join(Asset, CorporateAction.asset_id == Asset.id)
+                .where(
+                    Asset.owner_user_id.is_(None),
+                    CorporateAction.ex_date >= start_date,
+                    CorporateAction.ex_date <= end_date,
+                )
+                .order_by(CorporateAction.ex_date.desc())
+                .limit(350)
+            )
+        ).all()
+        for ca, asset in ca_rows:
+            mapped_type = "DIVIDEND" if ca.action_type == "CASH_DIVIDEND" else "BONUS_RIGHTS"
+            detail_badge = (
+                f"Rs {float(ca.payout_per_share):.2f}/sh"
+                if ca.action_type == "CASH_DIVIDEND"
+                else f"{float(ca.ratio_numerator):g}% {ca.action_type.replace('_', ' ').title()}"
+            )
+            base_events.append(
+                {
+                    "id": f"ca-{ca.id}",
+                    "event_date": ca.ex_date.isoformat(),
+                    "is_upcoming": ca.ex_date >= today,
+                    "event_type": mapped_type,
+                    "symbol": asset.symbol,
+                    "company_name": asset.name,
+                    "sector": asset.sector_or_category,
+                    "title": ca.description or f"{asset.symbol} {ca.action_type.replace('_', ' ').title()}",
+                    "badge": detail_badge,
+                    "source_url": f"https://dps.psx.com.pk/company/{asset.symbol}",
+                    "is_shariah_compliant": asset.is_shariah_compliant,
+                }
+            )
+
+        start_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+        ann_rows = (
+            await db.execute(
+                select(Announcement, Asset)
+                .join(Asset, Announcement.asset_id == Asset.id)
+                .where(
+                    Asset.owner_user_id.is_(None),
+                    Announcement.published_at >= start_dt,
+                )
+                .order_by(Announcement.published_at.desc())
+                .limit(350)
+            )
+        ).all()
+        for ann, asset in ann_rows:
+            doc_cat = _classify_download_category(ann.title, ann.category)
+            if doc_cat not in {"BOARD_MEETING", "RESULTS"}:
+                continue
+            ev_date = ann.published_at.date()
+            base_events.append(
+                {
+                    "id": f"ann-{ann.id}",
+                    "event_date": ev_date.isoformat(),
+                    "is_upcoming": ev_date >= today,
+                    "event_type": doc_cat,
+                    "symbol": asset.symbol,
+                    "company_name": asset.name,
+                    "sector": asset.sector_or_category,
+                    "title": ann.title,
+                    "badge": "Board Meeting" if doc_cat == "BOARD_MEETING" else "Financial Results",
+                    "source_url": ann.source_url,
+                    "is_shariah_compliant": asset.is_shariah_compliant,
+                }
+            )
+        return base_events
+
+    raw_events = await api_cache.get_or_set(f"calendar:base:{days_back}:{days_ahead}", 120.0, _load_calendar_base)
+
     my_symbols: set[str] = set()
     if user is not None:
         wl_syms = (
@@ -834,101 +933,18 @@ async def corporate_calendar(
     et_u = event_type.strip().upper()
 
     events: list[dict[str, Any]] = []
+    for ev in raw_events:
+        if et_u != "ALL" and ev["event_type"] != et_u:
+            continue
+        if sym_u and ev["symbol"].upper() != sym_u:
+            continue
+        if sec_l and sec_l not in (ev["sector"] or "").lower():
+            continue
+        in_mine = ev["symbol"].upper() in my_symbols
+        if my_stocks_only and not in_mine:
+            continue
+        events.append({**ev, "in_my_stocks": in_mine})
 
-    # 1. Corporate Actions (Ex-Dividends, Bonus, Right Issues, Splits)
-    if et_u in {"ALL", "DIVIDEND", "BONUS_RIGHTS"}:
-        ca_rows = (
-            await db.execute(
-                select(CorporateAction, Asset)
-                .join(Asset, CorporateAction.asset_id == Asset.id)
-                .where(
-                    Asset.owner_user_id.is_(None),
-                    CorporateAction.ex_date >= start_date,
-                    CorporateAction.ex_date <= end_date,
-                )
-                .order_by(CorporateAction.ex_date.desc())
-                .limit(300)
-            )
-        ).all()
-        for ca, asset in ca_rows:
-            mapped_type = "DIVIDEND" if ca.action_type == "CASH_DIVIDEND" else "BONUS_RIGHTS"
-            if et_u != "ALL" and mapped_type != et_u:
-                continue
-            if sym_u and asset.symbol.upper() != sym_u:
-                continue
-            if sec_l and sec_l not in (asset.sector_or_category or "").lower():
-                continue
-            if my_stocks_only and asset.symbol.upper() not in my_symbols:
-                continue
-            detail_badge = (
-                f"Rs {float(ca.payout_per_share):.2f}/sh"
-                if ca.action_type == "CASH_DIVIDEND"
-                else f"{float(ca.ratio_numerator):g}% {ca.action_type.replace('_', ' ').title()}"
-            )
-            events.append(
-                {
-                    "id": f"ca-{ca.id}",
-                    "event_date": ca.ex_date.isoformat(),
-                    "is_upcoming": ca.ex_date >= today,
-                    "event_type": mapped_type,
-                    "symbol": asset.symbol,
-                    "company_name": asset.name,
-                    "sector": asset.sector_or_category,
-                    "title": ca.description or f"{asset.symbol} {ca.action_type.replace('_', ' ').title()}",
-                    "badge": detail_badge,
-                    "source_url": f"https://dps.psx.com.pk/company/{asset.symbol}",
-                    "in_my_stocks": asset.symbol.upper() in my_symbols,
-                    "is_shariah_compliant": asset.is_shariah_compliant,
-                }
-            )
-
-    # 2. PUCARS Board Meetings & Financial Results Announcements
-    if et_u in {"ALL", "BOARD_MEETING", "RESULTS"}:
-        start_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
-        ann_rows = (
-            await db.execute(
-                select(Announcement, Asset)
-                .join(Asset, Announcement.asset_id == Asset.id)
-                .where(
-                    Asset.owner_user_id.is_(None),
-                    Announcement.published_at >= start_dt,
-                )
-                .order_by(Announcement.published_at.desc())
-                .limit(350)
-            )
-        ).all()
-        for ann, asset in ann_rows:
-            doc_cat = _classify_download_category(ann.title, ann.category)
-            if doc_cat not in {"BOARD_MEETING", "RESULTS"}:
-                continue
-            if et_u != "ALL" and doc_cat != et_u:
-                continue
-            if sym_u and asset.symbol.upper() != sym_u:
-                continue
-            if sec_l and sec_l not in (asset.sector_or_category or "").lower():
-                continue
-            if my_stocks_only and asset.symbol.upper() not in my_symbols:
-                continue
-            ev_date = ann.published_at.date()
-            events.append(
-                {
-                    "id": f"ann-{ann.id}",
-                    "event_date": ev_date.isoformat(),
-                    "is_upcoming": ev_date >= today,
-                    "event_type": doc_cat,
-                    "symbol": asset.symbol,
-                    "company_name": asset.name,
-                    "sector": asset.sector_or_category,
-                    "title": ann.title,
-                    "badge": "Board Meeting" if doc_cat == "BOARD_MEETING" else "Financial Results",
-                    "source_url": ann.source_url,
-                    "in_my_stocks": asset.symbol.upper() in my_symbols,
-                    "is_shariah_compliant": asset.is_shariah_compliant,
-                }
-            )
-
-    events.sort(key=lambda e: (0 if e["is_upcoming"] else 1, e["event_date"] if e["is_upcoming"] else ""), reverse=False)
-    # Sort upcoming ascending (soonest first), past descending (most recent first)
     upcoming = sorted([e for e in events if e["is_upcoming"]], key=lambda e: e["event_date"])
     recent = sorted([e for e in events if not e["is_upcoming"]], key=lambda e: e["event_date"], reverse=True)
     ordered = upcoming + recent
@@ -961,31 +977,25 @@ async def list_downloadable_filings(
     cat_u = category.strip().upper()
     q_l = q.strip().lower()
 
-    items: list[dict[str, Any]] = []
-
-    # 1. PUCARS Announcements with official PDF URLs
-    if cat_u != "FMR":
+    async def _load_downloads(target_sym: str | None) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
         ann_stmt = (
             select(Announcement, Asset)
             .join(Asset, Announcement.asset_id == Asset.id)
             .where(Asset.owner_user_id.is_(None), Announcement.source_url.is_not(None))
             .order_by(Announcement.published_at.desc())
-            .limit(400)
+            .limit(450 if target_sym is None else 150)
         )
-        if sym_u:
-            ann_stmt = ann_stmt.where(Asset.symbol == sym_u)
+        if target_sym:
+            ann_stmt = ann_stmt.where(Asset.symbol == target_sym)
         ann_rows = (await db.execute(ann_stmt)).all()
         for ann, asset in ann_rows:
             if not ann.source_url:
                 continue
             doc_cat = _classify_download_category(ann.title, ann.category)
-            if cat_u != "ALL" and doc_cat != cat_u:
-                continue
-            if q_l and q_l not in ann.title.lower() and q_l not in asset.symbol.lower() and q_l not in asset.name.lower():
-                continue
             dt_str = ann.published_at.date().isoformat()
             fname = _sanitize_filename(f"{asset.symbol}_{dt_str}_{ann.title[:48]}")
-            items.append(
+            out.append(
                 {
                     "id": f"ann-{ann.id}",
                     "symbol": asset.symbol,
@@ -1001,8 +1011,6 @@ async def list_downloadable_filings(
                 }
             )
 
-    # 2. AMC SECP Monthly Fund Manager Report (FMR) PDFs
-    if cat_u in {"ALL", "FMR"}:
         fmr_stmt = (
             select(FundFmrSnapshot, Asset)
             .join(Asset, FundFmrSnapshot.asset_id == Asset.id)
@@ -1010,29 +1018,26 @@ async def list_downloadable_filings(
             .order_by(FundFmrSnapshot.report_month.desc())
             .limit(120)
         )
-        if sym_u:
-            fmr_stmt = fmr_stmt.where(Asset.symbol == sym_u)
+        if target_sym:
+            fmr_stmt = fmr_stmt.where(Asset.symbol == target_sym)
         fmr_rows = (await db.execute(fmr_stmt)).all()
         seen_fmr_urls: set[str] = set()
         for fmr, asset in fmr_rows:
             if not fmr.source_url:
                 continue
-            # Deduplicate multi-fund AMC booklet PDFs in ALL view unless symbol specifically queried
-            dedup_key = f"{fmr.amc_name}:{fmr.source_url}" if not sym_u else f"{asset.symbol}:{fmr.source_url}"
+            dedup_key = f"{fmr.amc_name}:{fmr.source_url}" if not target_sym else f"{asset.symbol}:{fmr.source_url}"
             if dedup_key in seen_fmr_urls:
                 continue
             seen_fmr_urls.add(dedup_key)
             title = f"{fmr.amc_name} — SECP Fund Manager Report ({fmr.report_label or fmr.report_month})"
-            if sym_u:
+            if target_sym:
                 title = f"{asset.symbol} ({asset.name}) — {title}"
-            if q_l and q_l not in title.lower() and q_l not in asset.symbol.lower():
-                continue
             fname = _sanitize_filename(f"{fmr.amc_name}_FMR_{fmr.report_month}")
-            items.append(
+            out.append(
                 {
                     "id": f"fmr-{fmr.id}",
-                    "symbol": asset.symbol if sym_u else fmr.amc_name[:12].upper(),
-                    "company_name": asset.name if sym_u else fmr.amc_name,
+                    "symbol": asset.symbol if target_sym else fmr.amc_name[:12].upper(),
+                    "company_name": asset.name if target_sym else fmr.amc_name,
                     "sector": "Mutual Funds / SECP FMR",
                     "doc_type": "FMR",
                     "title": title,
@@ -1043,11 +1048,23 @@ async def list_downloadable_filings(
                     "format": "PDF",
                 }
             )
+        out.sort(key=lambda x: x["published_date"] or "", reverse=True)
+        return out
 
-    items.sort(key=lambda x: x["published_date"] or "", reverse=True)
+    cache_key = f"downloads:sym:{sym_u}" if sym_u else "downloads:base"
+    all_items = await api_cache.get_or_set(cache_key, 120.0, lambda: _load_downloads(sym_u))
+
+    filtered: list[dict[str, Any]] = []
+    for it in all_items:
+        if cat_u != "ALL" and it["doc_type"] != cat_u:
+            continue
+        if q_l and q_l not in it["title"].lower() and q_l not in it["symbol"].lower() and q_l not in it["company_name"].lower():
+            continue
+        filtered.append(it)
+
     return {
-        "total": len(items),
-        "items": items[:limit],
+        "total": len(filtered),
+        "items": filtered[:limit],
     }
 
 

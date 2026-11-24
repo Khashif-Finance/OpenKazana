@@ -6,7 +6,8 @@ import { ArrowRight, Download, ExternalLink, Megaphone, Newspaper, RefreshCw, Sh
 import { useAppContext } from "@/components/CurrencyContext";
 import { MarketHeatmap } from "@/components/MarketHeatmap";
 import { BarPoint, PriceChart } from "@/components/PriceChart";
-import { apiFetch } from "@/lib/api";
+import { ChartSkeleton, KpiGridSkeleton } from "@/components/Skeletons";
+import { apiFetchCached } from "@/lib/api";
 import { formatMoney, formatNumber, formatPct, pctColorClass } from "@/lib/format";
 
 interface AssetItem {
@@ -74,10 +75,16 @@ export default function MarketHubPage() {
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
-  const loadOverview = useCallback(async () => {
+  const loadOverview = useCallback(async (forceRefresh = false) => {
     setRefreshing(true);
     try {
-      const res = await apiFetch<OverviewPayload>("/api/v1/market/overview");
+      const res = await apiFetchCached<OverviewPayload>("/api/v1/market/overview", 60_000, {
+        forceRefresh,
+        onUpdate: (fresh) => {
+          setData(fresh);
+          if (Number(fresh.usd_to_pkr) > 0) setUsdToPkr(Number(fresh.usd_to_pkr));
+        },
+      });
       setData(res);
       setError("");
       if (Number(res.usd_to_pkr) > 0) setUsdToPkr(Number(res.usd_to_pkr));
@@ -89,8 +96,8 @@ export default function MarketHubPage() {
   }, [setUsdToPkr]);
 
   useEffect(() => {
-    loadOverview();
-    apiFetch<{
+    loadOverview(false);
+    apiFetchCached<{
       items: Array<{
         id: string;
         title: string;
@@ -100,7 +107,9 @@ export default function MarketHubPage() {
         matched_symbols: string[];
         published_at: string;
       }>;
-    }>("/api/v1/market/news?limit=6")
+    }>("/api/v1/market/news?limit=6", 60_000, {
+      onUpdate: (r) => setHeadlines(r.items || []),
+    })
       .then((r) => setHeadlines(r.items || []))
       .catch(() => {});
   }, [loadOverview]);
@@ -108,13 +117,16 @@ export default function MarketHubPage() {
   useEffect(() => {
     if (!autoRefresh) return;
     const id = setInterval(() => {
-      loadOverview();
+      loadOverview(true);
     }, 30000);
     return () => clearInterval(id);
   }, [autoRefresh, loadOverview]);
 
   useEffect(() => {
-    apiFetch<BarPoint[]>(`/api/v1/market/assets/${encodeURIComponent(selectedIndex)}/bars?timeframe=1D&limit=60`)
+    apiFetchCached<BarPoint[]>(
+      `/api/v1/market/assets/${encodeURIComponent(selectedIndex)}/bars?timeframe=1D&limit=60`,
+      120_000,
+    )
       .then(setIndexBars)
       .catch(() => setIndexBars([]));
   }, [selectedIndex]);
@@ -128,7 +140,12 @@ export default function MarketHubPage() {
   }
 
   if (!data) {
-    return <div className="okz-card p-8 text-sm okz-muted">Loading Pakistan market overview...</div>;
+    return (
+      <div className="space-y-6">
+        <KpiGridSkeleton count={8} cols="grid-cols-2 sm:grid-cols-4" />
+        <ChartSkeleton heightClass="h-64" />
+      </div>
+    );
   }
 
   const macroCards: AssetItem[] = [
@@ -176,7 +193,7 @@ export default function MarketHubPage() {
           </Link>
           <button
             type="button"
-            onClick={() => loadOverview()}
+            onClick={() => loadOverview(true)}
             disabled={refreshing}
             className="px-3 py-2 rounded-lg border border-[var(--border)] text-xs font-semibold hover:bg-[var(--card-muted)] inline-flex items-center gap-1.5"
           >

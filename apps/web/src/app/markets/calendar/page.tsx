@@ -1,9 +1,11 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { BookmarkCheck, CalendarDays, Download, ExternalLink, ShieldCheck } from "lucide-react";
-import { apiFetch } from "@/lib/api";
+import { CardListSkeleton } from "@/components/Skeletons";
+import { TickerAutocomplete } from "@/components/TickerAutocomplete";
+import { apiFetchCached } from "@/lib/api";
 
 interface CalendarEvent {
   id: string;
@@ -45,29 +47,39 @@ export default function CorporateCalendarPage() {
 
   useEffect(() => {
     setLoading(true);
-    const params = new URLSearchParams({ event_type: eventType });
-    if (symbol.trim()) params.set("symbol", symbol.trim().toUpperCase());
-    if (myOnly) params.set("my_stocks_only", "true");
-    apiFetch<CalendarPayload>(`/api/v1/market/calendar?${params.toString()}`)
+    apiFetchCached<CalendarPayload>("/api/v1/market/calendar?event_type=ALL", 120_000, { onUpdate: setData })
       .then(setData)
       .catch(() => setData(null))
       .finally(() => setLoading(false));
-  }, [eventType, symbol, myOnly]);
+  }, []);
 
-  // Group events by YYYY-MM month header
-  const grouped: Array<{ monthLabel: string; events: CalendarEvent[] }> = [];
-  const monthMap = new Map<string, CalendarEvent[]>();
-  for (const ev of data?.events || []) {
-    const key = ev.event_date.slice(0, 7);
-    if (!monthMap.has(key)) {
-      const arr: CalendarEvent[] = [];
-      monthMap.set(key, arr);
-      const dt = new Date(`${key}-01T00:00:00Z`);
-      const label = dt.toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
-      grouped.push({ monthLabel: label, events: arr });
+  // Instant 0ms client-side filtering & month grouping
+  const grouped = useMemo(() => {
+    const symUp = symbol.trim().toUpperCase();
+    const filtered = (data?.events || []).filter((ev) => {
+      if (eventType !== "ALL" && ev.event_type !== eventType) return false;
+      if (symUp && !ev.symbol.toUpperCase().includes(symUp) && !ev.company_name.toUpperCase().includes(symUp)) {
+        return false;
+      }
+      if (myOnly && !ev.in_my_stocks) return false;
+      return true;
+    });
+
+    const out: Array<{ monthLabel: string; events: CalendarEvent[] }> = [];
+    const monthMap = new Map<string, CalendarEvent[]>();
+    for (const ev of filtered) {
+      const key = ev.event_date.slice(0, 7);
+      if (!monthMap.has(key)) {
+        const arr: CalendarEvent[] = [];
+        monthMap.set(key, arr);
+        const dt = new Date(`${key}-01T00:00:00Z`);
+        const label = dt.toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+        out.push({ monthLabel: label, events: arr });
+      }
+      monthMap.get(key)!.push(ev);
     }
-    monthMap.get(key)!.push(ev);
-  }
+    return out;
+  }, [data, eventType, symbol, myOnly]);
 
   return (
     <div className="space-y-6">
@@ -119,11 +131,12 @@ export default function CorporateCalendarPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <input
+          <TickerAutocomplete
             value={symbol}
-            onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-            placeholder="Filter Ticker (MEBL)"
-            className="w-36 px-3 py-1.5 rounded-md border border-[var(--border)] bg-[var(--bg)] font-mono uppercase text-xs"
+            onChange={(val) => setSymbol(val.toUpperCase())}
+            onSelect={(item) => setSymbol(item.symbol)}
+            placeholder="Filter ticker or company..."
+            className="w-52"
           />
           <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-[var(--border)] cursor-pointer select-none">
             <input type="checkbox" checked={myOnly} onChange={(e) => setMyOnly(e.target.checked)} />
@@ -134,7 +147,7 @@ export default function CorporateCalendarPage() {
       </div>
 
       {loading && !data ? (
-        <div className="okz-card p-8 text-center text-sm okz-muted">Loading corporate calendar...</div>
+        <CardListSkeleton count={4} cols="grid-cols-1" />
       ) : grouped.length === 0 ? (
         <div className="okz-card p-8 text-center text-sm okz-muted">
           No calendar events matched your current filter. Try disabling &ldquo;My Holdings &amp; Watchlist&rdquo; or clearing the ticker filter.

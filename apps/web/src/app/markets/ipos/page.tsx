@@ -1,9 +1,10 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Download, ExternalLink, FileText, Megaphone, Newspaper, Rocket, ShieldCheck } from "lucide-react";
-import { apiFetch } from "@/lib/api";
+import { CardListSkeleton } from "@/components/Skeletons";
+import { apiFetchCached } from "@/lib/api";
 import { formatNumber, formatPct, pctColorClass } from "@/lib/format";
 
 interface IpoRow {
@@ -68,13 +69,20 @@ export default function IposAndDevelopmentsPage() {
 
   useEffect(() => {
     setLoading(true);
-    apiFetch<IpoPayload>(`/api/v1/market/ipos?board=${boardFilter}`)
+    apiFetchCached<IpoPayload>("/api/v1/market/ipos?board=ALL", 180_000, { onUpdate: setData })
       .then(setData)
       .catch(() => setData(null))
       .finally(() => setLoading(false));
-  }, [boardFilter]);
+  }, []);
 
-  const filteredDevs = (data?.developments || []).filter((d) => devType === "ALL" || d.doc_type === devType);
+  const filteredIpos = useMemo(
+    () => (data?.ipos || []).filter((ipo) => boardFilter === "ALL" || ipo.board.toUpperCase() === boardFilter),
+    [data, boardFilter],
+  );
+  const filteredDevs = useMemo(
+    () => (data?.developments || []).filter((d) => devType === "ALL" || d.doc_type === devType),
+    [data, devType],
+  );
 
   return (
     <div className="space-y-6">
@@ -173,10 +181,10 @@ export default function IposAndDevelopmentsPage() {
       </div>
 
       {loading && !data ? (
-        <div className="okz-card p-8 text-center text-sm okz-muted">Loading PSX IPOs &amp; developments...</div>
+        <CardListSkeleton count={4} cols="grid-cols-1 md:grid-cols-2" />
       ) : tab === "ipos" ? (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {(data?.ipos || []).map((ipo) => (
+          {filteredIpos.map((ipo) => (
             <div key={ipo.id} className="okz-card p-5 space-y-3 flex flex-col justify-between">
               <div className="space-y-2">
                 <div className="flex items-start justify-between gap-2">

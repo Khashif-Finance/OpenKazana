@@ -1,9 +1,11 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Download, ExternalLink, FileSpreadsheet, FileText, Search } from "lucide-react";
-import { apiFetch } from "@/lib/api";
+import { Download, ExternalLink, FileSpreadsheet, FileText, Search, X } from "lucide-react";
+import { TableSkeleton } from "@/components/Skeletons";
+import { TickerAutocomplete } from "@/components/TickerAutocomplete";
+import { apiFetchCached } from "@/lib/api";
 
 interface DownloadItem {
   id: string;
@@ -54,14 +56,32 @@ export default function FilingsDownloadsPage() {
 
   useEffect(() => {
     setLoading(true);
-    const params = new URLSearchParams({ category, limit: "100" });
-    if (symbol.trim()) params.set("symbol", symbol.trim().toUpperCase());
-    if (q.trim()) params.set("q", q.trim());
-    apiFetch<DownloadsPayload>(`/api/v1/market/downloads?${params.toString()}`)
+    const symParam = symbol.trim().toUpperCase();
+    const url = symParam
+      ? `/api/v1/market/downloads?limit=200&symbol=${encodeURIComponent(symParam)}`
+      : "/api/v1/market/downloads?limit=200";
+    apiFetchCached<DownloadsPayload>(url, 120_000, { onUpdate: setData })
       .then(setData)
       .catch(() => setData(null))
       .finally(() => setLoading(false));
-  }, [symbol, category, q]);
+  }, [symbol]);
+
+  // Instant 0ms client-side filter for category & free-text search
+  const filteredItems = useMemo(() => {
+    const qLow = q.trim().toLowerCase();
+    return (data?.items || []).filter((item) => {
+      if (category !== "ALL" && item.doc_type !== category) return false;
+      if (
+        qLow &&
+        !item.title.toLowerCase().includes(qLow) &&
+        !item.symbol.toLowerCase().includes(qLow) &&
+        !item.company_name.toLowerCase().includes(qLow)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [data, category, q]);
 
   return (
     <div className="space-y-6">
@@ -80,11 +100,13 @@ export default function FilingsDownloadsPage() {
         <div className="p-3 rounded-lg border border-[var(--border)] bg-[var(--card)] flex flex-wrap items-center gap-2 text-xs shrink-0">
           <FileSpreadsheet className="w-4 h-4 text-emerald-500" />
           <span className="font-semibold">Export 3-Statement CSV:</span>
-          <input
+          <TickerAutocomplete
             value={csvTicker}
-            onChange={(e) => setCsvTicker(e.target.value.toUpperCase())}
-            placeholder="MEBL"
-            className="w-24 px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg)] font-mono uppercase"
+            onChange={(val) => setCsvTicker(val.toUpperCase())}
+            onSelect={(item) => setCsvTicker(item.symbol)}
+            assetClasses={["PSX_EQUITY", "INTL_EQUITY"]}
+            placeholder="MEBL..."
+            className="w-40"
           />
           <a
             href={`/api/v1/market/stocks/${encodeURIComponent(csvTicker.trim() || "MEBL")}/reports/export`}
@@ -100,29 +122,31 @@ export default function FilingsDownloadsPage() {
       <div className="okz-card p-4 space-y-3 text-xs">
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative flex-1 min-w-56">
-            <Search className="w-3.5 h-3.5 okz-muted absolute left-3 top-1/2 -translate-y-1/2" />
+            <Search className="w-3.5 h-3.5 okz-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Search document title, company name, or AMC..."
-              className="w-full pl-8 pr-3 py-1.5 rounded-md border border-[var(--border)] bg-[var(--bg)] text-xs"
+              placeholder="Instant filter document title, company name, or AMC..."
+              className="w-full pl-8 pr-7 py-1.5 rounded-md border border-[var(--border)] bg-[var(--bg)] text-xs"
             />
+            {q && (
+              <button
+                type="button"
+                onClick={() => setQ("")}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 okz-muted hover:text-[var(--text)]"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
-          <input
+          <TickerAutocomplete
             value={symbol}
-            onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-            placeholder="Stock Ticker (e.g. OGDC)"
-            className="w-40 px-3 py-1.5 rounded-md border border-[var(--border)] bg-[var(--bg)] font-mono uppercase text-xs"
+            onChange={(val) => setSymbol(val.toUpperCase())}
+            onSelect={(item) => setSymbol(item.symbol)}
+            placeholder="Filter stock (e.g. OGDC, Meezan)..."
+            className="w-56"
           />
-          {symbol && (
-            <button
-              type="button"
-              onClick={() => setSymbol("")}
-              className="px-2.5 py-1.5 rounded-md border border-[var(--border)] okz-muted hover:text-[var(--text)]"
-            >
-              Clear
-            </button>
-          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-[var(--border)]">
@@ -154,18 +178,18 @@ export default function FilingsDownloadsPage() {
         <div className="px-5 py-3 border-b border-[var(--border)] flex items-center justify-between text-xs">
           <span className="font-semibold flex items-center gap-1.5">
             <FileText className="w-4 h-4 text-sky-400" />
-            Official Downloadable Documents ({data?.total || 0})
+            Official Downloadable Documents ({filteredItems.length})
           </span>
           <span className="okz-muted">Served directly from official PSX PUCARS &amp; Pakistan AMC archives</span>
         </div>
 
         {loading && !data ? (
-          <div className="p-8 text-center text-sm okz-muted">Loading filings &amp; reports catalog...</div>
-        ) : !data || data.items.length === 0 ? (
+          <TableSkeleton rows={8} cols={4} />
+        ) : filteredItems.length === 0 ? (
           <div className="p-8 text-center text-sm okz-muted">No documents matched your search filter.</div>
         ) : (
           <div className="divide-y divide-[var(--border)] text-xs">
-            {data.items.map((item) => {
+            {filteredItems.map((item) => {
               const badge = DOC_BADGES[item.doc_type] || DOC_BADGES.MATERIAL;
               return (
                 <div

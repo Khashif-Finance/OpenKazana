@@ -1,29 +1,40 @@
 """
-State Bank of Pakistan (SBP) & Global Macro Rate Scraper.
+State Bank of Pakistan (SBP EasyData / EcoData) & Pakistan Bureau of Statistics (PBS) Macro Scraper.
 
-Fetches live authoritative Pakistani macro indicators from State Bank of Pakistan:
-- SBP Monetary Policy Rate (`https://www.sbp.org.pk/`)
-- KIBOR Bid/Offer (3M, 6M, 12M), Market Treasury Bills (1M, 3M, 6M, 12M),
-  and Pakistan Investment Bonds / PKRV yields (2Y, 3Y, 5Y, 10Y) from
-  `https://www.sbp.org.pk/ecodata/kibor_index.asp` (fallback `/dfmd/pkrv.asp`)
-- Headline CPI YoY inflation when published on SBP pages / ecodata
-- US 10-Year Treasury Yield (`^TNX`) via yfinance for USD/Global CAPM & Sharpe benchmarks
+Fetches live authoritative Pakistani & Global macro indicators:
+  1. PBS IMF-SDMX Monthly CPI (`https://www.pbs.gov.pk/cpi`):
+     - Exact monthly Headline CPI YoY % (`PK_CPI_YOY`, 40+ consecutive months), MoM % (`PK_CPI_MOM`),
+       and all 12 COICOP Inflation Basket sub-indices (`PK_CPI_BASKET`: Food, Housing/Utilities,
+       Transport, Health, Education, etc. with official weights & YoY %).
+  2. SBP Homepage & KIBOR/PKRV (`sbp.org.pk`):
+     - SBP Monetary Policy Rate (`SBP_POLICY_RATE`)
+     - KIBOR Offer (3M, 6M, 12M), Market T-Bills (1M, 3M, 6M, 12M), PIB Yields (2Y, 3Y, 5Y, 10Y)
+  3. SBP EasyData / EcoData Official Excel Datasets (`sbp.org.pk/assets/document/`):
+     - Liquid Foreign Exchange Reserves (`SBP_FX_RESERVES_BN` & `PK_TOTAL_FX_RESERVES_BN`)
+     - Monthly Workers' Remittances (`SBP_REMITTANCES_MN` + top country corridors)
+     - Monthly Current Account Balance (`SBP_CURRENT_ACCOUNT_MN`)
+  4. US 10-Year Treasury Yield (`^TNX`) via yfinance for USD/Global CAPM & Sharpe benchmarks.
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import re
+import xml.etree.ElementTree as ET
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+import httpx
+import openpyxl
 from bs4 import BeautifulSoup
 from curl_cffi.requests import AsyncSession as CurlAsyncSession
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import api_cache
 from app.models.market import MacroIndicator
 from app.scrapers.base import BaseScraper
 
@@ -34,6 +45,11 @@ SBP_HOME_URL = "https://www.sbp.org.pk/"
 SBP_KIBOR_URL = "https://www.sbp.org.pk/ecodata/kibor_index.asp"
 SBP_PKRV_URL = "https://www.sbp.org.pk/dfmd/pkrv.asp"
 SBP_ECODATA_INDEX_URL = "https://www.sbp.org.pk/ecodata/index2.asp"
+SBP_FOREX_XLSX_URL = "https://www.sbp.org.pk/assets/document/Forex_Arch.xlsx"
+SBP_REMIT_XLSX_URL = "https://www.sbp.org.pk/assets/document/Homeremit_Arch.xlsx"
+SBP_BOP_XLSX_URL = "https://www.sbp.org.pk/assets/document/bop.xlsx"
+PBS_SDMX_CPI_URL = "https://www.pbs.gov.pk/cpi"
+WORLDBANK_PK_CPI_URL = "https://api.worldbank.org/v2/country/PAK/indicator/FP.CPI.TOTL.ZG?format=json&per_page=15"
 
 SBP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -43,6 +59,26 @@ SBP_HEADERS = {
 
 DEFAULT_PKR_RISK_FREE_PCT = D("12.00")
 DEFAULT_USD_RISK_FREE_PCT = D("4.25")
+
+COICOP_GROUP_LABELS: dict[str, str] = {
+    "PCPI_CP_01": "Food & Non-Alcoholic Beverages",
+    "PCPI_CP_02": "Tobacco & Beverages",
+    "PCPI_CP_03": "Clothing & Footwear",
+    "PCPI_CP_04": "Housing, Electricity & Gas",
+    "PCPI_CP_05": "Furnishing & Household",
+    "PCPI_CP_06": "Health",
+    "PCPI_CP_07": "Transport",
+    "PCPI_CP_08": "Communication",
+    "PCPI_CP_09": "Recreation & Culture",
+    "PCPI_CP_10": "Education",
+    "PCPI_CP_11": "Restaurants & Hotels",
+    "PCPI_CP_12": "Miscellaneous Goods & Services",
+}
+
+MONTH_ABBR = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
 
 
 def _clean_pct(raw: str | float | int | None) -> Decimal | None:
@@ -72,6 +108,27 @@ def _parse_as_of_date(text: str) -> date:
             except ValueError:
                 continue
     return date.today()
+
+
+def _parse_excel_month_header(cell_val: Any) -> date | None:
+    """Parse SBP Excel header values like datetime(2026, 7, 17), 'Oct-26', 'Sep-26R', 'Aug-2026'."""
+    if isinstance(cell_val, datetime):
+        return date(cell_val.year, cell_val.month, 1)
+    if isinstance(cell_val, date):
+        return date(cell_val.year, cell_val.month, 1)
+    if not isinstance(cell_val, str):
+        return None
+    s = re.sub(r"[RP*#\s]+$", "", cell_val.strip())
+    m = re.match(r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/\s](\d{2,4})$", s, re.I)
+    if not m:
+        return None
+    mo = MONTH_ABBR.get(m.group(1)[:3].lower())
+    yr = int(m.group(2))
+    if yr < 100:
+        yr = 2000 + yr if yr < 70 else 1900 + yr
+    if mo and 1970 <= yr <= 2100:
+        return date(yr, mo, 1)
+    return None
 
 
 def parse_sbp_policy_rate_html(html: str) -> list[dict[str, Any]]:
@@ -109,6 +166,7 @@ def parse_sbp_policy_rate_html(html: str) -> list[dict[str, Any]]:
                 "unit": "%",
                 "as_of_date": as_of,
                 "source_url": SBP_HOME_URL,
+                "source_label": "State Bank of Pakistan",
                 "extra_json": {"note": eff_match.group(0)[:120] if eff_match else "SBP MPC Target Rate"},
             }
         )
@@ -143,7 +201,6 @@ def parse_sbp_kibor_pkrv_html(html: str, source_url: str = SBP_KIBOR_URL) -> lis
 
         joined = " ".join(" ".join(r) for r in parsed_rows).upper()
 
-        # Table 1: KIBOR (3 columns: Tenor | Bid | Offer)
         if any(len(r) >= 3 and re.match(r"^(3|6|9|12)\s*-?\s*M", r[0], re.I) for r in parsed_rows) and (
             "KIBOR" in joined or "BID" in joined or "OFFER" in joined or len(parsed_rows[0]) == 3
         ):
@@ -166,12 +223,12 @@ def parse_sbp_kibor_pkrv_html(html: str, source_url: str = SBP_KIBOR_URL) -> lis
                         "unit": "%",
                         "as_of_date": as_of,
                         "source_url": source_url,
+                        "source_label": "State Bank of Pakistan",
                         "extra_json": {"bid": float(bid) if bid is not None else None, "offer": float(offer)},
                     }
                 )
             continue
 
-        # Distinguish T-Bill vs PIB tables (2 columns: Tenor | Yield%)
         for r in parsed_rows:
             if len(r) < 2:
                 continue
@@ -192,6 +249,7 @@ def parse_sbp_kibor_pkrv_html(html: str, source_url: str = SBP_KIBOR_URL) -> lis
                         "unit": "%",
                         "as_of_date": as_of,
                         "source_url": source_url,
+                        "source_label": "State Bank of Pakistan",
                         "extra_json": {"instrument": "MTB"},
                     }
                 )
@@ -207,11 +265,11 @@ def parse_sbp_kibor_pkrv_html(html: str, source_url: str = SBP_KIBOR_URL) -> lis
                         "unit": "%",
                         "as_of_date": as_of,
                         "source_url": source_url,
+                        "source_label": "State Bank of Pakistan",
                         "extra_json": {"instrument": "PIB"},
                     }
                 )
 
-    # De-duplicate keeping the last/most specific occurrence per series_key
     dedup: dict[str, dict[str, Any]] = {}
     for item in rows_out:
         dedup[item["series_key"]] = item
@@ -241,12 +299,385 @@ def parse_sbp_cpi_html(html: str, source_url: str = SBP_ECODATA_INDEX_URL) -> li
             "unit": "%",
             "as_of_date": date.today(),
             "source_url": source_url,
+            "source_label": "State Bank of Pakistan",
             "extra_json": {"snippet": m.group(0)[:120]},
         }
     ]
 
 
-WORLDBANK_PK_CPI_URL = "https://api.worldbank.org/v2/country/PAK/indicator/FP.CPI.TOTL.ZG?format=json&per_page=15"
+def parse_pbs_sdmx_cpi_xml(xml_text: str) -> list[dict[str, Any]]:
+    """
+    Parse Pakistan Bureau of Statistics (PBS) IMF-SDMX CPI XML (`https://www.pbs.gov.pk/cpi`).
+    Computes exact monthly Headline CPI YoY %, MoM %, 40+ month series, AND 12-group COICOP
+    inflation breakdown (Food, Housing/Utilities, Transport, Health, Education, etc.).
+    """
+    if not xml_text or "StructureSpecificData" not in xml_text[:600]:
+        return []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+
+    index_series: dict[str, dict[str, float]] = {}
+    weight_map: dict[str, float] = {}
+
+    for elem in root.iter():
+        if not elem.tag.endswith("Series"):
+            continue
+        ind = str(elem.attrib.get("INDICATOR") or "").strip()
+        if not ind:
+            continue
+        obs_dict: dict[str, float] = {}
+        for child in elem:
+            if not child.tag.endswith("Obs"):
+                continue
+            tp = str(child.attrib.get("TIME_PERIOD") or "").strip()
+            ov = child.attrib.get("OBS_VALUE")
+            if not re.match(r"^\d{4}-\d{2}$", tp) or ov is None:
+                continue
+            try:
+                obs_dict[tp] = float(ov)
+            except ValueError:
+                continue
+        if not obs_dict:
+            continue
+        if ind.endswith("_WT"):
+            latest_k = max(obs_dict.keys())
+            weight_map[ind[:-3]] = round(obs_dict[latest_k], 2)
+        elif ind.endswith("_IX"):
+            index_series[ind] = obs_dict
+
+    headline = index_series.get("PCPI_IX")
+    if not headline or len(headline) < 13:
+        return []
+
+    def _prev_year_month(ym: str) -> str:
+        y, m = int(ym[:4]), int(ym[5:7])
+        return f"{y - 1:04d}-{m:02d}"
+
+    def _prev_month(ym: str) -> str:
+        y, m = int(ym[:4]), int(ym[5:7])
+        if m == 1:
+            return f"{y - 1:04d}-12"
+        return f"{y:04d}-{m - 1:02d}"
+
+    sorted_yms = sorted(headline.keys())
+    yoy_pts: list[dict[str, Any]] = []
+    mom_pts: list[dict[str, Any]] = []
+
+    for ym in sorted_yms:
+        cur = headline[ym]
+        py = headline.get(_prev_year_month(ym))
+        pm = headline.get(_prev_month(ym))
+        if py and py > 0:
+            yoy = round(((cur / py) - 1.0) * 100.0, 2)
+            yoy_pts.append({"date": f"{ym}-01", "month": ym, "value": yoy, "index": round(cur, 2)})
+        if pm and pm > 0:
+            mom = round(((cur / pm) - 1.0) * 100.0, 2)
+            mom_pts.append({"date": f"{ym}-01", "month": ym, "value": mom, "index": round(cur, 2)})
+
+    if not yoy_pts:
+        return []
+
+    latest_ym = yoy_pts[-1]["month"]
+    latest_dt = date(int(latest_ym[:4]), int(latest_ym[5:7]), 1)
+
+    # Build 12-group COICOP inflation breakdown for the latest month
+    basket_rows: list[dict[str, Any]] = []
+    for base_code, label in COICOP_GROUP_LABELS.items():
+        ser = index_series.get(f"{base_code}_IX")
+        if not ser:
+            continue
+        cur_v = ser.get(latest_ym)
+        py_v = ser.get(_prev_year_month(latest_ym))
+        pm_v = ser.get(_prev_month(latest_ym))
+        wt = weight_map.get(base_code, 0.0)
+        if cur_v is None or py_v is None or py_v <= 0:
+            continue
+        grp_yoy = round(((cur_v / py_v) - 1.0) * 100.0, 2)
+        grp_mom = round(((cur_v / pm_v) - 1.0) * 100.0, 2) if (pm_v and pm_v > 0) else None
+        contrib_pct = round((wt / 100.0) * grp_yoy, 2)
+        basket_rows.append(
+            {
+                "code": base_code,
+                "group": label,
+                "weight_pct": wt,
+                "index": round(cur_v, 2),
+                "yoy_pct": grp_yoy,
+                "mom_pct": grp_mom,
+                "contribution_pct": contrib_pct,
+            }
+        )
+    basket_rows.sort(key=lambda x: x["weight_pct"], reverse=True)
+
+    results: list[dict[str, Any]] = [
+        {
+            "series_key": "PK_CPI_YOY",
+            "name": "Pakistan National CPI Inflation (YoY)",
+            "category": "INFLATION",
+            "tenor": "MONTHLY",
+            "value": Decimal(str(yoy_pts[-1]["value"])).quantize(D("0.0001")),
+            "unit": "%",
+            "as_of_date": latest_dt,
+            "source_url": PBS_SDMX_CPI_URL,
+            "source_label": "PBS SDMX (Monthly National CPI)",
+            "replace_history": True,
+            "extra_json": {"month": latest_ym, "index": yoy_pts[-1]["index"]},
+            "history_points": yoy_pts[-60:],
+        }
+    ]
+    if mom_pts:
+        results.append(
+            {
+                "series_key": "PK_CPI_MOM",
+                "name": "Pakistan National CPI Inflation (MoM)",
+                "category": "INFLATION",
+                "tenor": "MONTHLY",
+                "value": Decimal(str(mom_pts[-1]["value"])).quantize(D("0.0001")),
+                "unit": "%",
+                "as_of_date": latest_dt,
+                "source_url": PBS_SDMX_CPI_URL,
+                "source_label": "PBS SDMX (Monthly National CPI)",
+                "replace_history": True,
+                "extra_json": {"month": latest_ym},
+                "history_points": mom_pts[-36:],
+            }
+        )
+    if basket_rows:
+        results.append(
+            {
+                "series_key": "PK_CPI_BASKET",
+                "name": "PBS 12-Group CPI Inflation Basket (YoY)",
+                "category": "INFLATION_BASKET",
+                "tenor": latest_ym,
+                "value": Decimal(str(yoy_pts[-1]["value"])).quantize(D("0.0001")),
+                "unit": "%",
+                "as_of_date": latest_dt,
+                "source_url": PBS_SDMX_CPI_URL,
+                "source_label": "PBS SDMX (COICOP 12 Groups)",
+                "replace_history": True,
+                "extra_json": {"month": latest_ym},
+                "history_points": basket_rows,
+            }
+        )
+    return results
+
+
+def parse_sbp_remittances_xlsx(raw_bytes: bytes) -> list[dict[str, Any]]:
+    """Parse SBP `Homeremit_Arch.xlsx` into monthly Workers' Remittances (`SBP_REMITTANCES_MN`)."""
+    if not raw_bytes:
+        return []
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(raw_bytes), data_only=True, read_only=True)
+    except Exception:
+        return []
+
+    ws = wb[wb.sheetnames[-1]]
+    rows = list(ws.iter_rows(values_only=True))
+    header_row_idx = None
+    month_cols: list[tuple[int, date]] = []
+
+    for r_idx, row in enumerate(rows[:15]):
+        found: list[tuple[int, date]] = []
+        for c_idx, cell in enumerate(row):
+            dt = _parse_excel_month_header(cell)
+            if dt is not None:
+                found.append((c_idx, dt))
+        if len(found) >= 12:
+            header_row_idx = r_idx
+            month_cols = found
+            break
+
+    if header_row_idx is None or not month_cols:
+        return []
+
+    # Find total Cash remittances row right below header
+    total_row = None
+    corridors: dict[str, float] = {}
+    last_col_idx = month_cols[-1][0]
+    for row in rows[header_row_idx + 1 : header_row_idx + 25]:
+        first_txt = " ".join(str(x or "").strip() for x in row[:3]).lower()
+        if total_row is None and ("cash" in first_txt or "total" in first_txt):
+            total_row = row
+            continue
+        for c_name in ("saudi arabia", "u.a.e.", "u.k.", "usa"):
+            if c_name in first_txt and last_col_idx < len(row) and isinstance(row[last_col_idx], (int, float)):
+                corridors[c_name.upper().rstrip(".")] = round(float(row[last_col_idx]), 1)
+
+    if total_row is None:
+        return []
+
+    pts: list[dict[str, Any]] = []
+    for c_idx, dt in month_cols:
+        if c_idx >= len(total_row):
+            continue
+        v = total_row[c_idx]
+        if isinstance(v, (int, float)) and v > 100:
+            pts.append({"date": dt.isoformat(), "month": dt.strftime("%Y-%m"), "value": round(float(v), 1)})
+
+    if not pts:
+        return []
+    pts.sort(key=lambda x: x["date"])
+    latest = pts[-1]
+    return [
+        {
+            "series_key": "SBP_REMITTANCES_MN",
+            "name": "Workers' Remittances (Monthly)",
+            "category": "EXTERNAL",
+            "tenor": "MONTHLY",
+            "value": Decimal(str(latest["value"])).quantize(D("0.01")),
+            "unit": "USD Mn",
+            "as_of_date": date.fromisoformat(latest["date"]),
+            "source_url": SBP_REMIT_XLSX_URL,
+            "source_label": "SBP EasyData / EcoData",
+            "replace_history": True,
+            "extra_json": {"corridors_usd_mn": corridors},
+            "history_points": pts[-60:],
+        }
+    ]
+
+
+def parse_sbp_forex_reserves_xlsx(raw_bytes: bytes) -> list[dict[str, Any]]:
+    """Parse SBP `Forex_Arch.xlsx` (Week-end sheet) into Net SBP & Total Liquid FX Reserves (USD Bn)."""
+    if not raw_bytes:
+        return []
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(raw_bytes), data_only=True, read_only=True)
+    except Exception:
+        return []
+
+    target_sheet = next((s for s in wb.sheetnames if "week" in s.lower()), wb.sheetnames[-1])
+    ws = wb[target_sheet]
+    sbp_pts: list[dict[str, Any]] = []
+    tot_pts: list[dict[str, Any]] = []
+    today_d = date.today()
+
+    for row in ws.iter_rows(values_only=True):
+        if len(row) < 5:
+            continue
+        dt_cell = row[1]
+        dt_val: date | None = None
+        if isinstance(dt_cell, datetime):
+            dt_val = dt_cell.date()
+        elif isinstance(dt_cell, date):
+            dt_val = dt_cell
+        elif isinstance(dt_cell, str):
+            # Strip trailing SBP footnote markers like "20-Apr-23 16/" or "14-Aug-26*"
+            cleaned_dt = re.sub(r"\s+\d+/\s*$", "", dt_cell.strip())
+            m = re.match(r"^(\d{1,2})[-/\s]([A-Za-z]{3})[-/\s](\d{2}|\d{4})(?:\D|$)", cleaned_dt)
+            if m:
+                mo = MONTH_ABBR.get(m.group(2).lower())
+                yr = int(m.group(3))
+                if yr < 100:
+                    yr += 2000
+                if mo and 2015 <= yr <= today_d.year:
+                    try:
+                        dt_val = date(yr, mo, int(m.group(1)))
+                    except ValueError:
+                        dt_val = None
+        if dt_val is None or dt_val.year < 2015 or dt_val > today_d:
+            continue
+        sbp_mn = row[2]
+        tot_mn = row[4]
+        if isinstance(sbp_mn, (int, float)) and sbp_mn > 500:
+            sbp_pts.append({"date": dt_val.isoformat(), "value": round(float(sbp_mn) / 1000.0, 2)})
+        if isinstance(tot_mn, (int, float)) and tot_mn > 1000:
+            tot_pts.append({"date": dt_val.isoformat(), "value": round(float(tot_mn) / 1000.0, 2)})
+
+    out: list[dict[str, Any]] = []
+    if sbp_pts:
+        sbp_pts.sort(key=lambda x: x["date"])
+        latest = sbp_pts[-1]
+        out.append(
+            {
+                "series_key": "SBP_FX_RESERVES_BN",
+                "name": "SBP Net FX Reserves",
+                "category": "EXTERNAL",
+                "tenor": "WEEKLY",
+                "value": Decimal(str(latest["value"])).quantize(D("0.01")),
+                "unit": "USD Bn",
+                "as_of_date": date.fromisoformat(latest["date"]),
+                "source_url": SBP_FOREX_XLSX_URL,
+                "source_label": "SBP EasyData / EcoData",
+                "replace_history": True,
+                "history_points": sbp_pts[-60:],
+            }
+        )
+    if tot_pts:
+        tot_pts.sort(key=lambda x: x["date"])
+        latest_t = tot_pts[-1]
+        out.append(
+            {
+                "series_key": "PK_TOTAL_FX_RESERVES_BN",
+                "name": "Total Liquid FX Reserves (SBP + Banks)",
+                "category": "EXTERNAL",
+                "tenor": "WEEKLY",
+                "value": Decimal(str(latest_t["value"])).quantize(D("0.01")),
+                "unit": "USD Bn",
+                "as_of_date": date.fromisoformat(latest_t["date"]),
+                "source_url": SBP_FOREX_XLSX_URL,
+                "source_label": "SBP EasyData / EcoData",
+                "replace_history": True,
+                "history_points": tot_pts[-60:],
+            }
+        )
+    return out
+
+
+def parse_sbp_bop_xlsx(raw_bytes: bytes) -> list[dict[str, Any]]:
+    """Parse SBP `bop.xlsx` (`1.Summary BOP`) into monthly Current Account Balance (`SBP_CURRENT_ACCOUNT_MN`)."""
+    if not raw_bytes:
+        return []
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(raw_bytes), data_only=True, read_only=True)
+    except Exception:
+        return []
+
+    ws = wb[wb.sheetnames[0]]
+    cab_pts: dict[str, dict[str, Any]] = {}
+    today_d = date.today()
+    for row in ws.iter_rows(values_only=True):
+        if len(row) < 12:
+            continue
+        dt_cell = row[0]
+        if not isinstance(dt_cell, (datetime, date)):
+            continue
+        dt_val = dt_cell.date() if isinstance(dt_cell, datetime) else dt_cell
+        if dt_val.year < 2018 or dt_val > today_d:
+            continue
+        # Skip future FY placeholder rows where Current Account Credit & Debit are both zero/empty
+        cred = row[1] if isinstance(row[1], (int, float)) else 0.0
+        debt = row[2] if isinstance(row[2], (int, float)) else 0.0
+        if abs(float(cred)) < 100.0 and abs(float(debt)) < 100.0:
+            continue
+        # Col 1 = Total Current Account Credit, Col 2 = Debit, Col 11 = Net Balance
+        bal = row[11]
+        if not isinstance(bal, (int, float)):
+            bal = float(cred) - float(debt)
+        ym = dt_val.strftime("%Y-%m")
+        if ym not in cab_pts:
+            cab_pts[ym] = {"date": dt_val.isoformat(), "month": ym, "value": round(float(bal), 1)}
+
+    if not cab_pts:
+        return []
+    pts = [cab_pts[k] for k in sorted(cab_pts.keys())]
+    latest = pts[-1]
+    return [
+        {
+            "series_key": "SBP_CURRENT_ACCOUNT_MN",
+            "name": "Current Account Balance (Monthly)",
+            "category": "EXTERNAL",
+            "tenor": "MONTHLY",
+            "value": Decimal(str(latest["value"])).quantize(D("0.01")),
+            "unit": "USD Mn",
+            "as_of_date": date.fromisoformat(latest["date"]),
+            "source_url": SBP_BOP_XLSX_URL,
+            "source_label": "SBP EasyData / EcoData",
+            "replace_history": True,
+            "history_points": pts[-48:],
+        }
+    ]
+
 
 # Official published State Bank of Pakistan MPC Policy Rate decisions (2020-present)
 # Appended with live scraped SBP homepage Policy Rate decision on every run.
@@ -317,7 +748,7 @@ def _fetch_us_10y_treasury_sync() -> dict[str, Any] | None:
 
 
 def parse_worldbank_cpi_json(payload: Any) -> dict[str, Any] | None:
-    """Parse World Bank `FP.CPI.TOTL.ZG` JSON array into PK_CPI_YOY with multi-year history."""
+    """Emergency fallback parser for World Bank `FP.CPI.TOTL.ZG` JSON array if PBS SDMX XML is unreachable."""
     if not isinstance(payload, list) or len(payload) < 2 or not isinstance(payload[1], list):
         return None
     pts: list[dict[str, Any]] = []
@@ -343,7 +774,7 @@ def parse_worldbank_cpi_json(payload: Any) -> dict[str, Any] | None:
         "unit": "%",
         "as_of_date": date(latest["year"], 6, 30),
         "source_url": WORLDBANK_PK_CPI_URL,
-        "source_label": "World Bank / PBS (FP.CPI.TOTL.ZG)",
+        "source_label": "World Bank / PBS (Fallback)",
         "extra_json": {"indicator": "FP.CPI.TOTL.ZG"},
         "history_points": [{"date": p["date"], "value": p["value"]} for p in pts[-12:]],
     }
@@ -376,24 +807,38 @@ async def get_live_risk_free_rate_pct(db: AsyncSession, currency: str = "PKR") -
 
 
 class SbpMacroScraper(BaseScraper):
-    """Fetches SBP Policy Rate, KIBOR, T-Bill, PIB curve, CPI, and US 10Y yield."""
+    """Fetches SBP Policy Rate, KIBOR, T-Bill, PIB curve, PBS Monthly CPI/Basket, SBP FX Reserves/Remittances/CAB & US 10Y."""
 
     name = "sbp_macro"
 
     async def run(self, db: AsyncSession) -> int:
         collected: list[dict[str, Any]] = []
 
+        # 1. PBS IMF-SDMX Monthly CPI + 12-Group COICOP Inflation Basket (authoritative monthly CPI!)
+        has_pbs_cpi = False
+        try:
+            async with httpx.AsyncClient(timeout=18.0, follow_redirects=True, verify=False, headers=SBP_HEADERS) as ac:
+                r_pbs = await ac.get(PBS_SDMX_CPI_URL)
+                if r_pbs.status_code == 200:
+                    pbs_items = await asyncio.to_thread(parse_pbs_sdmx_cpi_xml, r_pbs.text)
+                    if pbs_items:
+                        collected.extend(pbs_items)
+                        has_pbs_cpi = True
+        except Exception as exc:
+            logger.warning("PBS SDMX CPI fetch warning: %s", exc)
+
         async with CurlAsyncSession(impersonate="chrome", timeout=20) as session:
-            # 1. SBP Homepage -> Policy Rate (+ Inflation link if available)
+            # 2. SBP Homepage -> Policy Rate
             try:
                 r_home = await session.get(SBP_HOME_URL, headers=SBP_HEADERS)
                 if r_home.status_code == 200:
                     collected.extend(parse_sbp_policy_rate_html(r_home.text))
-                    collected.extend(parse_sbp_cpi_html(r_home.text, SBP_HOME_URL))
+                    if not has_pbs_cpi:
+                        collected.extend(parse_sbp_cpi_html(r_home.text, SBP_HOME_URL))
             except Exception as exc:
                 logger.warning("SBP home scrape failed: %s", exc)
 
-            # 2. SBP KIBOR / T-Bills / PIB curve
+            # 3. SBP KIBOR / T-Bills / PIB curve
             for url in (SBP_KIBOR_URL, SBP_PKRV_URL):
                 try:
                     r_rates = await session.get(url, headers=SBP_HEADERS)
@@ -405,30 +850,36 @@ class SbpMacroScraper(BaseScraper):
                 except Exception as exc:
                     logger.warning("SBP rates scrape failed on %s: %s", url, exc)
 
-            # 3. Official Pakistan CPI YoY fallback via World Bank / PBS open API (with 10Y history)
-            wb_cpi: dict[str, Any] | None = None
-            try:
-                r_wb = await session.get(WORLDBANK_PK_CPI_URL, headers=SBP_HEADERS)
-                if r_wb.status_code == 200:
-                    wb_cpi = parse_worldbank_cpi_json(r_wb.json())
-            except Exception as exc:
-                logger.debug("World Bank Pakistan CPI fetch skipped: %s", exc)
-
-            if not any(item["series_key"] == "PK_CPI_YOY" for item in collected):
+            # 4. SBP EasyData / EcoData Official Excel Datasets (FX Reserves, Workers' Remittances, Current Account)
+            async def _fetch_sbp_xlsx(url: str, parser_fn):
                 try:
-                    r_eco = await session.get(SBP_ECODATA_INDEX_URL, headers=SBP_HEADERS)
-                    if r_eco.status_code == 200:
-                        collected.extend(parse_sbp_cpi_html(r_eco.text, SBP_ECODATA_INDEX_URL))
-                except Exception:
-                    pass
-            if wb_cpi is not None:
-                existing_cpi = next((item for item in collected if item["series_key"] == "PK_CPI_YOY"), None)
-                if existing_cpi is None:
-                    collected.append(wb_cpi)
-                else:
-                    existing_cpi["history_points"] = wb_cpi.get("history_points", [])
+                    rx = await session.get(url, headers=SBP_HEADERS)
+                    if rx.status_code == 200 and len(rx.content) > 5000:
+                        return await asyncio.to_thread(parser_fn, rx.content)
+                except Exception as exc:
+                    logger.debug("SBP Excel fetch skipped (%s): %s", url, exc)
+                return []
 
-        # 4. US 10Y Treasury Yield (5Y monthly) via yfinance
+            sbp_ext_batches = await asyncio.gather(
+                _fetch_sbp_xlsx(SBP_FOREX_XLSX_URL, parse_sbp_forex_reserves_xlsx),
+                _fetch_sbp_xlsx(SBP_REMIT_XLSX_URL, parse_sbp_remittances_xlsx),
+                _fetch_sbp_xlsx(SBP_BOP_XLSX_URL, parse_sbp_bop_xlsx),
+            )
+            for batch in sbp_ext_batches:
+                collected.extend(batch)
+
+            # 5. Emergency World Bank fallback ONLY if PBS monthly CPI failed
+            if not has_pbs_cpi and not any(item["series_key"] == "PK_CPI_YOY" for item in collected):
+                try:
+                    r_wb = await session.get(WORLDBANK_PK_CPI_URL, headers=SBP_HEADERS)
+                    if r_wb.status_code == 200:
+                        wb_cpi = parse_worldbank_cpi_json(r_wb.json())
+                        if wb_cpi is not None:
+                            collected.append(wb_cpi)
+                except Exception as exc:
+                    logger.debug("World Bank Pakistan CPI fallback skipped: %s", exc)
+
+        # 6. US 10Y Treasury Yield (5Y monthly) via yfinance
         us10y = await asyncio.to_thread(_fetch_us_10y_treasury_sync)
         if us10y is not None:
             collected.append(us10y)
@@ -454,23 +905,26 @@ class SbpMacroScraper(BaseScraper):
             source_lbl = payload.get("source_label") or (
                 "yfinance (^TNX)" if code_key == "US_10Y_TREASURY" else "State Bank of Pakistan"
             )
-            hist_entry = {"date": payload["as_of_date"].isoformat(), "value": float(payload["value"])}
-            if payload.get("extra_json"):
-                hist_entry.update(payload["extra_json"])
 
-            merged_by_date: dict[str, dict[str, Any]] = {}
-            if code_key == "SBP_POLICY_RATE":
-                for pt in SBP_POLICY_RATE_HISTORICAL_DECISIONS:
-                    merged_by_date[pt["date"]] = dict(pt)
-            for pt in (payload.get("history_points") or []):
-                if pt.get("date"):
-                    merged_by_date[str(pt["date"])] = dict(pt)
-            if row is not None:
-                for pt in (row.history_json or []):
-                    if isinstance(pt, dict) and pt.get("date"):
+            if payload.get("replace_history"):
+                final_hist = list(payload.get("history_points") or [])
+            else:
+                hist_entry = {"date": payload["as_of_date"].isoformat(), "value": float(payload["value"])}
+                if payload.get("extra_json"):
+                    hist_entry.update(payload["extra_json"])
+                merged_by_date: dict[str, dict[str, Any]] = {}
+                if code_key == "SBP_POLICY_RATE":
+                    for pt in SBP_POLICY_RATE_HISTORICAL_DECISIONS:
+                        merged_by_date[pt["date"]] = dict(pt)
+                for pt in (payload.get("history_points") or []):
+                    if pt.get("date"):
                         merged_by_date[str(pt["date"])] = dict(pt)
-            merged_by_date[hist_entry["date"]] = hist_entry
-            final_hist = [merged_by_date[k] for k in sorted(merged_by_date.keys())][-80:]
+                if row is not None:
+                    for pt in (row.history_json or []):
+                        if isinstance(pt, dict) and pt.get("date"):
+                            merged_by_date[str(pt["date"])] = dict(pt)
+                merged_by_date[hist_entry["date"]] = hist_entry
+                final_hist = [merged_by_date[k] for k in sorted(merged_by_date.keys())][-80:]
 
             if row is None:
                 db.add(
@@ -500,4 +954,6 @@ class SbpMacroScraper(BaseScraper):
             upserted += 1
 
         await db.commit()
+        api_cache.invalidate_prefix("macro")
+        api_cache.invalidate_prefix("overview")
         return upserted

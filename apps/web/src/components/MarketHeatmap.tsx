@@ -4,7 +4,8 @@ import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Grid2X2, ShieldCheck } from "lucide-react";
 import { ResponsiveContainer, Tooltip as RechartsTooltip, Treemap } from "recharts";
-import { apiFetch } from "@/lib/api";
+import { ChartSkeleton } from "@/components/Skeletons";
+import { apiFetchCached } from "@/lib/api";
 import { formatNumber, formatPct, pctColorClass } from "@/lib/format";
 
 interface HeatmapStock {
@@ -123,17 +124,13 @@ export function MarketHeatmap() {
     const sp = new URLSearchParams();
     sp.set("index_only", indexFilter);
     if (shariahOnly) sp.set("shariah_only", "true");
-    apiFetch<HeatmapPayload>(`/api/v1/market/heatmap?${sp.toString()}`)
+    apiFetchCached<HeatmapPayload>(`/api/v1/market/heatmap?${sp.toString()}`, 120_000, { onUpdate: setData })
       .then(setData)
       .catch(() => {});
   }, [indexFilter, shariahOnly]);
 
   if (!data || !data.sectors || data.sectors.length === 0) {
-    return (
-      <div className="okz-card p-5 text-xs okz-muted">
-        Loading PSX Market Treemap Heatmap...
-      </div>
-    );
+    return <ChartSkeleton heightClass="h-72" />;
   }
 
   const { breadth, sectors } = data;

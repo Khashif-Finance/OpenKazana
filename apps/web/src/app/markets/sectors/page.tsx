@@ -1,10 +1,11 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { ChevronDown, GitCompareArrows, Layers, Search, ShieldCheck, TrendingDown, TrendingUp } from "lucide-react";
+import { ChevronDown, GitCompareArrows, Layers, Search, ShieldCheck, TrendingDown, TrendingUp, X } from "lucide-react";
 import { useAppContext } from "@/components/CurrencyContext";
-import { apiFetch } from "@/lib/api";
+import { CardListSkeleton } from "@/components/Skeletons";
+import { apiFetchCached } from "@/lib/api";
 import { formatNumber, formatPct, pctColorClass } from "@/lib/format";
 
 interface SectorStockRow {
@@ -72,11 +73,11 @@ export default function SectorsExplorerPage() {
     setLoading(true);
     const params = new URLSearchParams({ market });
     if (shariahOnly) params.set("shariah_only", "true");
-    if (q.trim()) params.set("q", q.trim());
-    apiFetch<SectorsPayload>(`/api/v1/market/sectors?${params.toString()}`)
+    apiFetchCached<SectorsPayload>(`/api/v1/market/sectors?${params.toString()}`, 120_000, {
+      onUpdate: setData,
+    })
       .then((res) => {
         setData(res);
-        // Auto-expand top sector on initial load
         if (res.sectors.length > 0 && Object.keys(expanded).length === 0) {
           setExpanded({ [res.sectors[0].sector]: true });
         }
@@ -84,15 +85,26 @@ export default function SectorsExplorerPage() {
       .catch(() => setData(null))
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [market, shariahOnly, q]);
+  }, [market, shariahOnly]);
 
-  const sortedSectors = [...(data?.sectors || [])].sort((a, b) => {
-    if (sortBy === "change") return b.cap_weighted_change_pct - a.cap_weighted_change_pct;
-    if (sortBy === "pe") return (a.median_pe ?? 999) - (b.median_pe ?? 999);
-    if (sortBy === "yield") return (b.median_div_yield_pct ?? 0) - (a.median_div_yield_pct ?? 0);
-    if (sortBy === "count") return b.stock_count - a.stock_count;
-    return b.total_market_cap_mn - a.total_market_cap_mn;
-  });
+  // Instant 0ms client-side search & sorting across all sectors and constituents
+  const sortedSectors = useMemo(() => {
+    const qLow = q.trim().toLowerCase();
+    const list = (data?.sectors || []).filter((sec) => {
+      if (!qLow) return true;
+      if (sec.sector.toLowerCase().includes(qLow)) return true;
+      return sec.stocks.some(
+        (st) => st.symbol.toLowerCase().includes(qLow) || st.name.toLowerCase().includes(qLow),
+      );
+    });
+    return [...list].sort((a, b) => {
+      if (sortBy === "change") return b.cap_weighted_change_pct - a.cap_weighted_change_pct;
+      if (sortBy === "pe") return (a.median_pe ?? 999) - (b.median_pe ?? 999);
+      if (sortBy === "yield") return (b.median_div_yield_pct ?? 0) - (a.median_div_yield_pct ?? 0);
+      if (sortBy === "count") return b.stock_count - a.stock_count;
+      return b.total_market_cap_mn - a.total_market_cap_mn;
+    });
+  }, [data, q, sortBy]);
 
   const toggleSector = (sec: string) => {
     setExpanded((prev) => ({ ...prev, [sec]: !prev[sec] }));
@@ -140,13 +152,23 @@ export default function SectorsExplorerPage() {
       <div className="okz-card p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
         <div className="flex flex-wrap items-center gap-2 flex-1 min-w-60">
           <div className="relative flex-1 max-w-sm">
-            <Search className="w-3.5 h-3.5 okz-muted absolute left-3 top-1/2 -translate-y-1/2" />
+            <Search className="w-3.5 h-3.5 okz-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Search sector, ticker (MEBL, LUCK), or company..."
-              className="w-full pl-8 pr-3 py-1.5 rounded-md border border-[var(--border)] bg-[var(--bg)] text-xs"
+              placeholder="Instant filter: sector, ticker (MEBL, LUCK), or company..."
+              className="w-full pl-8 pr-7 py-1.5 rounded-md border border-[var(--border)] bg-[var(--bg)] text-xs"
             />
+            {q && (
+              <button
+                type="button"
+                onClick={() => setQ("")}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 okz-muted hover:text-[var(--text)]"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
           <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-[var(--border)] cursor-pointer select-none">
             <input type="checkbox" checked={shariahOnly} onChange={(e) => setShariahOnly(e.target.checked)} />
@@ -185,7 +207,7 @@ export default function SectorsExplorerPage() {
 
       {/* Expandable Sector Accordions */}
       {loading && !data ? (
-        <div className="okz-card p-8 text-center text-sm okz-muted">Computing Pandas sector analytics...</div>
+        <CardListSkeleton count={6} cols="grid-cols-1" />
       ) : sortedSectors.length === 0 ? (
         <div className="okz-card p-8 text-center text-sm okz-muted">No matching sectors found.</div>
       ) : (

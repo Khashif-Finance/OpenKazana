@@ -38,14 +38,17 @@ async_session_factory = async_sessionmaker(
 
 @event.listens_for(engine.sync_engine, "connect")
 def _configure_sqlite_wal(dbapi_connection, _connection_record) -> None:
-    """Enable SQLite WAL journal mode and busy timeout so concurrent background workers do not lock."""
+    """Enable SQLite WAL journal mode, 64MB page cache, mmap I/O, and busy timeout for fast concurrent reads."""
     if not _is_sqlite:
         return
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=15000")
+        cursor.execute("PRAGMA busy_timeout=30000")
         cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA cache_size=-64000")
+        cursor.execute("PRAGMA temp_store=MEMORY")
+        cursor.execute("PRAGMA mmap_size=268435456")
         cursor.execute("PRAGMA foreign_keys=ON")
     finally:
         cursor.close()

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import update
 
 from app.api.analytics import router as analytics_router
@@ -18,38 +19,33 @@ from app.api.hub import router as hub_router
 from app.api.market import router as market_router
 from app.api.portfolio import router as portfolio_router
 from app.api.watchlists import router as watchlists_router
+from app.core.cache import api_cache
 from app.core.config import get_settings
 from app.core.database import Base, async_session_factory, engine
 from app.core.redis_client import close_redis
 from app.models.market import ScraperRun
-from app.workers.arq_worker import run_scraper_by_name, sync_all_live_sources
+from app.workers.arq_worker import sync_all_live_sources
 from app.workers.seed import seed_if_empty
 
 logger = logging.getLogger("openkhazana.main")
 
 
 async def _periodic_live_sync_loop() -> None:
-    """In-process staged background scheduler: let initial HTTP requests complete first, then run non-blocking sync."""
+    """
+    Lightweight non-blocking background scheduler:
+    - Lets user HTTP traffic and startup cache warm-up finish cleanly first (35s grace).
+    - Runs fast live quote, macro, and news refreshes every 15 minutes without triggering
+      multi-minute full historical PDF/EOD backfills on the HTTP server event loop
+      (heavy deep backfills remain manually triggerable from `/status` or ARQ worker).
+    """
     try:
-        await asyncio.sleep(8.0)
-        logger.info("Phase 1 boot sync: FX/Gold, SBP Macro, PSX Intraday, Crypto, All-AMC NAVs, Intl, News & IPOs...")
-        await sync_all_live_sources(include_eod=False, include_deep_backfill=False)
-
-        # Phase 2: progressive non-blocking trickle backfill (PSX EOD history, AMC NAV history, PUCARS PDFs)
-        for step_name in ("psx_eod_history", "mufap_history", "psx_deep_fundamentals"):
-            if not get_settings().scrapers_enabled:
-                break
-            try:
-                await run_scraper_by_name(step_name, evaluate_after=False)
-                await asyncio.sleep(3.0)
-            except Exception as exc:
-                logger.warning("Staged backfill '%s' warning: %s", step_name, exc)
-
+        await asyncio.sleep(35.0)
         while True:
-            await asyncio.sleep(900)  # Refresh live quotes, news & next backfill slice every 15 minutes
             if get_settings().scrapers_enabled:
-                await sync_all_live_sources(include_eod=True, include_deep_backfill=False)
-                await run_scraper_by_name("psx_deep_fundamentals", evaluate_after=False)
+                logger.info("Scheduled light live sync: FX/Gold, SBP/PBS Macro, PSX Intraday, Crypto, News & IPOs...")
+                await sync_all_live_sources(include_eod=False, include_deep_backfill=False, light_only=True)
+                api_cache.invalidate_prefix("")
+            await asyncio.sleep(900)  # Refresh live quotes, macro & news every 15 minutes
     except asyncio.CancelledError:
         return
     except Exception as exc:
@@ -106,6 +102,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(GZipMiddleware, minimum_size=800, compresslevel=5)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
