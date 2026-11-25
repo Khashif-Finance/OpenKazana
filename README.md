@@ -31,7 +31,6 @@ Run it locally in **zero-login SQLite mode** in under a minute, or deploy it on 
 
 ## Screenshots
 
-> Add your screenshots to [`docs/screenshots/`](./docs/screenshots/README.md) and replace the blank placeholders below.
 
 ### 1. Market Overview, KSE-100 Index Point Contributors & Sector Treemap (`/`)
 > **[ Screenshot Placeholder — `docs/screenshots/01-market-overview.png` ]**
