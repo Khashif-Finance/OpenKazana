@@ -8,7 +8,7 @@ Powers:
      Strong Buy / Buy / Neutral / Sell / Strong Sell)
   3. Monthly Seasonality Return Heatmap (Year x Month Pandas pivot matrix) & Rolling 90D Vol/Sharpe/Beta
   4. Cross-Sectional PSX Sector Factor Percentile Ranks (Value, Quality, Income, Size, Composite 0-100)
-  5. Sarmaya.pk-style PSX Market Treemap Heatmap & Market Breadth (Advancers/Decliners + Sector Leaders)
+  5. Interactive PSX Market Treemap Heatmap & Market Breadth (Advancers/Decliners + Sector Leaders)
 """
 
 from __future__ import annotations
@@ -626,7 +626,7 @@ def compute_cross_sectional_factor_ranks_pandas(
 
 
 # ---------------------------------------------------------------------------
-# 5. Sarmaya.pk-Style PSX Market Treemap Heatmap & Market Breadth (Pandas)
+# 5. Interactive PSX Market Treemap Heatmap & Market Breadth (Pandas)
 # ---------------------------------------------------------------------------
 def compute_market_heatmap_pandas(stocks: list[dict[str, Any]]) -> dict[str, Any]:
     """Compute PSX Market Breadth + Market-Cap-Weighted Sector Treemap cells via Pandas."""

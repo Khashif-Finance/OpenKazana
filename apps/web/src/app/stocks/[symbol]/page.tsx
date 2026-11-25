@@ -6,6 +6,7 @@ import { useParams } from "next/navigation";
 import {
   Activity,
   AlertTriangle,
+  BookOpen,
   BookmarkPlus,
   Briefcase,
   Building2,
@@ -16,6 +17,7 @@ import {
   GitCompareArrows,
   Layers,
   Newspaper,
+  Printer,
   ShieldAlert,
   ShieldCheck,
   SlidersHorizontal,
@@ -37,7 +39,7 @@ import { FinancialReportsPanel, FinancialReportsPayload } from "@/components/Fin
 import { BarPoint, PriceChart } from "@/components/PriceChart";
 import { SeasonalityHeatmap, SeasonalityPayload } from "@/components/SeasonalityHeatmap";
 import { TechnicalGauge, TechnicalGaugePayload } from "@/components/TechnicalGauge";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiFetchCached } from "@/lib/api";
 import { formatMoney, formatNumber, formatPct, pctColorClass } from "@/lib/format";
 
 interface AnnualFinancialRow {
@@ -344,11 +346,42 @@ export default function StockDetailPage() {
   const [watchNotice, setWatchNotice] = useState<string | null>(null);
   const [dcfGrowth, setDcfGrowth] = useState<number>(12);
   const [dcfWacc, setDcfWacc] = useState<number>(17.5);
-  const [activeTab, setActiveTab] = useState<"overview" | "reports" | "technicals" | "valuation" | "dividends" | "news">("overview");
+  const [activeTab, setActiveTab] = useState<
+    "overview" | "reports" | "technicals" | "valuation" | "dividends" | "research" | "news"
+  >("overview");
   const [piotroskiOpen, setPiotroskiOpen] = useState<boolean>(false);
   const [stockNewsPayload, setStockNewsPayload] = useState<{
     stock_news: Array<{ id: string; title: string; summary: string; url: string; source_name: string; category: string; published_at: string }>;
     sector_news: Array<{ id: string; title: string; summary: string; url: string; source_name: string; category: string; published_at: string }>;
+  } | null>(null);
+  const [stockResearchPayload, setStockResearchPayload] = useState<{
+    stock_reports: Array<{
+      id: string;
+      broker_name: string;
+      title: string;
+      summary: string;
+      url: string;
+      pdf_url: string | null;
+      proxy_download_url: string | null;
+      report_type: string;
+      stance: string | null;
+      target_price: number | null;
+      published_at: string;
+    }>;
+    sector_reports: Array<{
+      id: string;
+      broker_name: string;
+      title: string;
+      summary: string;
+      url: string;
+      pdf_url: string | null;
+      proxy_download_url: string | null;
+      report_type: string;
+      stance: string | null;
+      target_price: number | null;
+      published_at: string;
+    }>;
+    portals: Array<{ broker_key: string; broker_name: string; short_name: string; url: string }>;
   } | null>(null);
 
   useEffect(() => {
@@ -368,6 +401,37 @@ export default function StockDetailPage() {
     }>(`/api/v1/market/stocks/${encodeURIComponent(symbol)}/news`)
       .then(setStockNewsPayload)
       .catch(() => setStockNewsPayload({ stock_news: [], sector_news: [] }));
+    apiFetchCached<{
+      stock_reports: Array<{
+        id: string;
+        broker_name: string;
+        title: string;
+        summary: string;
+        url: string;
+        pdf_url: string | null;
+        proxy_download_url: string | null;
+        report_type: string;
+        stance: string | null;
+        target_price: number | null;
+        published_at: string;
+      }>;
+      sector_reports: Array<{
+        id: string;
+        broker_name: string;
+        title: string;
+        summary: string;
+        url: string;
+        pdf_url: string | null;
+        proxy_download_url: string | null;
+        report_type: string;
+        stance: string | null;
+        target_price: number | null;
+        published_at: string;
+      }>;
+      portals: Array<{ broker_key: string; broker_name: string; short_name: string; url: string }>;
+    }>(`/api/v1/market/stocks/${encodeURIComponent(symbol)}/research`, 120_000)
+      .then(setStockResearchPayload)
+      .catch(() => setStockResearchPayload({ stock_reports: [], sector_reports: [], portals: [] }));
   }, [symbol]);
 
   useEffect(() => {
@@ -513,23 +577,42 @@ export default function StockDetailPage() {
             </Link>
             <button
               type="button"
+              onClick={() => window.print()}
+              title="Export clean 1-page Institutional Research Tear-Sheet PDF"
+              className="okz-no-print px-3 py-1.5 rounded-md border border-[var(--border)] hover:border-emerald-500 text-xs font-semibold inline-flex items-center gap-1.5"
+            >
+              <Printer className="w-3.5 h-3.5 text-emerald-500" /> Print Tear-Sheet
+            </button>
+            <button
+              type="button"
               onClick={handleAddToWatchlist}
-              className="px-3 py-1.5 rounded-md border border-[var(--border)] hover:border-emerald-500 text-xs font-semibold inline-flex items-center gap-1.5"
+              className="okz-no-print px-3 py-1.5 rounded-md border border-[var(--border)] hover:border-emerald-500 text-xs font-semibold inline-flex items-center gap-1.5"
             >
               <BookmarkPlus className="w-3.5 h-3.5 text-emerald-500" /> Add to Watchlist
             </button>
             <Link
               href="/portfolio"
-              className="px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+              className="okz-no-print px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold inline-flex items-center gap-1.5"
             >
               <Briefcase className="w-3.5 h-3.5" /> Log Trade
             </Link>
           </div>
-          {watchNotice && <div className="text-xs text-emerald-500">{watchNotice}</div>}
+          {watchNotice && <div className="text-xs text-emerald-500 okz-no-print">{watchNotice}</div>}
         </div>
       </div>
 
-      {/* Institutional 6-Tab Workbench Bar */}
+      {/* Print-Only Institutional Equity Tear-Sheet Banner */}
+      <div className="okz-print-only border-b-2 border-emerald-700 pb-2 mb-3 text-xs">
+        <div className="flex justify-between items-baseline">
+          <strong className="text-base">OpenKhazana — Institutional Equity Research Tear-Sheet</strong>
+          <span>Generated: {new Date().toLocaleDateString()}</span>
+        </div>
+        <div className="text-slate-600">
+          {asset.symbol} ({asset.name}) &middot; {asset.sector_or_category} &middot; Informational research memo only.
+        </div>
+      </div>
+
+      {/* Institutional 7-Tab Workbench Bar */}
       <div className="flex flex-wrap items-center gap-1.5 border-b border-[var(--border)] pb-2 text-xs">
         {(
           [
@@ -541,6 +624,10 @@ export default function StockDetailPage() {
             ["technicals", "Technicals & Seasonality"],
             ["valuation", "Valuation & Quality Lab"],
             ["dividends", `Dividends & Filings (${detail.announcements.length + detail.corporate_actions.length})`],
+            [
+              "research",
+              `Brokerage Research (${(stockResearchPayload?.stock_reports?.length || 0) + (stockResearchPayload?.sector_reports?.length || 0)})`,
+            ],
             [
               "news",
               `News & Sector (${(stockNewsPayload?.stock_news?.length || 0) + (stockNewsPayload?.sector_news?.length || 0)})`,
@@ -1698,7 +1785,158 @@ export default function StockDetailPage() {
         </div>
       )}
 
-      {/* TAB 6: STOCK-SPECIFIC & INDUSTRY NEWS */}
+      {/* TAB 6: BROKERAGE EQUITY RESEARCH REPORTS */}
+      {activeTab === "research" && (
+        <div className="space-y-5">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="okz-card p-5 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold flex items-center gap-1.5">
+                  <BookOpen className="w-4 h-4 text-emerald-500" />
+                  {asset.symbol} Stock-Specific Brokerage Research
+                </h2>
+                <Link
+                  href={`/stocks/research?symbol=${encodeURIComponent(asset.symbol)}`}
+                  className="text-xs text-sky-400 hover:underline"
+                >
+                  Full Research Hub &rarr;
+                </Link>
+              </div>
+              {!stockResearchPayload || stockResearchPayload.stock_reports.length === 0 ? (
+                <p className="text-xs okz-muted py-4">
+                  No brokerage research reports specifically tagged to {asset.symbol} yet. Open the{" "}
+                  <Link href="/stocks/research" className="text-emerald-400 hover:underline">
+                    Brokerage Research Hub
+                  </Link>{" "}
+                  to sync feeds or bookmark an external AHL / SCS / IMS / KASB / Chase PDF report for {asset.symbol}.
+                </p>
+              ) : (
+                <div className="divide-y divide-[var(--border)]">
+                  {stockResearchPayload.stock_reports.map((rep) => (
+                    <div key={rep.id} className="py-3 space-y-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
+                        <span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-400 font-bold">
+                          {rep.broker_name}
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded bg-[var(--card-muted)] okz-muted">
+                          {rep.report_type.replace("_", " ")}
+                        </span>
+                        {rep.stance && (
+                          <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-bold">
+                            {rep.stance}
+                          </span>
+                        )}
+                        {rep.target_price != null && (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 font-mono font-bold">
+                            TP Rs {rep.target_price.toLocaleString()}
+                          </span>
+                        )}
+                        <span className="okz-muted ml-auto font-mono">
+                          {new Date(rep.published_at).toLocaleDateString()}
+                        </span>
+                      </div>
+                      <a
+                        href={rep.pdf_url || rep.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="block text-xs font-semibold hover:text-emerald-400 leading-snug"
+                      >
+                        {rep.title}
+                      </a>
+                      {rep.summary && <p className="text-[11px] okz-muted line-clamp-2">{rep.summary}</p>}
+                      <div className="flex items-center gap-2 pt-0.5 text-[11px]">
+                        {rep.proxy_download_url && (
+                          <a
+                            href={rep.proxy_download_url}
+                            className="inline-flex items-center gap-1 text-emerald-400 hover:underline font-semibold"
+                          >
+                            <Download className="w-3 h-3" /> PDF
+                          </a>
+                        )}
+                        <a
+                          href={rep.pdf_url || rep.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 text-sky-400 hover:underline font-semibold"
+                        >
+                          Open Report <ExternalLink className="w-3 h-3" />
+                        </a>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="okz-card p-5 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold flex items-center gap-1.5">
+                  <Layers className="w-4 h-4 text-sky-400" />
+                  {asset.sector_or_category} Sector Research &amp; Strategy
+                </h2>
+                <Link href="/stocks/research" className="text-xs text-sky-400 hover:underline">
+                  All Reports &rarr;
+                </Link>
+              </div>
+              {!stockResearchPayload || stockResearchPayload.sector_reports.length === 0 ? (
+                <p className="text-xs okz-muted py-4">
+                  No sector-wide brokerage notes matched {asset.sector_or_category} in the current sync window.
+                </p>
+              ) : (
+                <div className="divide-y divide-[var(--border)]">
+                  {stockResearchPayload.sector_reports.map((rep) => (
+                    <div key={rep.id} className="py-3 space-y-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
+                        <span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-400 font-bold">
+                          {rep.broker_name}
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded bg-[var(--card-muted)] okz-muted">
+                          {rep.report_type.replace("_", " ")}
+                        </span>
+                        <span className="okz-muted ml-auto font-mono">
+                          {new Date(rep.published_at).toLocaleDateString()}
+                        </span>
+                      </div>
+                      <a
+                        href={rep.pdf_url || rep.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="block text-xs font-semibold hover:text-emerald-400 leading-snug"
+                      >
+                        {rep.title}
+                      </a>
+                      {rep.summary && <p className="text-[11px] okz-muted line-clamp-2">{rep.summary}</p>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {stockResearchPayload && stockResearchPayload.portals.length > 0 && (
+            <div className="okz-card p-4 flex flex-wrap items-center justify-between gap-3">
+              <span className="text-xs font-semibold okz-muted">
+                Check direct Pakistan institutional research desks for {asset.symbol}:
+              </span>
+              <div className="flex flex-wrap gap-2">
+                {stockResearchPayload.portals.map((p) => (
+                  <a
+                    key={p.broker_key}
+                    href={p.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-[var(--border)] hover:border-emerald-500 text-xs font-semibold"
+                  >
+                    {p.short_name} <ExternalLink className="w-3 h-3 text-sky-400" />
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB 7: STOCK-SPECIFIC & INDUSTRY NEWS */}
       {activeTab === "news" && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="okz-card p-5 space-y-3">

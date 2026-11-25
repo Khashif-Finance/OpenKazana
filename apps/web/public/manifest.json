@@ -1,9 +1,17 @@
 {
-  "name": "OpenKhazana",
+  "name": "OpenKhazana — Pakistan Financial Market Terminal",
   "short_name": "OpenKhazana",
-  "description": "Open-source Pakistan financial market hub and multi-asset portfolio tracker",
+  "description": "Open-source Pakistan institutional market terminal: PSX equities, 5-brokerage research, MUFAP & SECP FMR mutual funds, Forex, PMEX commodities, NSS/Sukuk & FBR tax portfolio tracker.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#090d16",
-  "theme_color": "#10b981"
+  "background_color": "#060a13",
+  "theme_color": "#059669",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
 }

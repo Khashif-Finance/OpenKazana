@@ -36,6 +36,7 @@ import {
 } from "recharts";
 import { useAppContext } from "@/components/CurrencyContext";
 import { CsvImportModal } from "@/components/CsvImportModal";
+import { DividendSnowballCard } from "@/components/DividendSnowballCard";
 import { BenchmarkCompareChart, BenchmarkPoint, PriceChart } from "@/components/PriceChart";
 import { EditableTransaction, TransactionModal } from "@/components/TransactionModal";
 import { apiFetch } from "@/lib/api";
@@ -780,6 +781,13 @@ export default function PortfolioPage() {
             Dismiss
           </button>
         </div>
+      )}
+
+      {activeId && summary && summary.holdings.length > 0 && (
+        <DividendSnowballCard
+          portfolioId={activeId}
+          refreshKey={summary.holdings.length + Math.round(Number(summary.total_market_value_pkr || 0) % 1000)}
+        />
       )}
 
       {showFbrPanel && fbrSummary && (

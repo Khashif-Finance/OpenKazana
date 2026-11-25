@@ -1964,3 +1964,230 @@ async def view_shared_portfolio(token: str, db: AsyncSession = Depends(get_db)):
         allocation_by_class=alloc_payload,
         holdings=holdings_payload,
     )
+
+
+@router.get("/api/v1/portfolios/{portfolio_id}/dividend-calendar")
+async def portfolio_dividend_snowball_calendar(
+    portfolio_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    12-Month Portfolio Passive Income & Dividend Snowball Calendar (Jan-Dec).
+    Combines open PSX/Global equity holdings (historical CorporateAction cash-dividend cadence or trailing yield)
+    and Daily Dividend / Income Mutual Funds, net of FBR WHT (Active/Late/Non-Filer) & Shariah purification.
+    """
+    portfolio = await _get_owned_portfolio(portfolio_id, user, db)
+    usd_to_pkr = await get_usd_to_pkr_rate(db)
+    filer_status = _filer_status(user)
+    txs = await _load_portfolio_transactions(portfolio.id, db)
+
+    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    months_acc = [
+        {
+            "month_num": i + 1,
+            "month": month_names[i],
+            "equity_gross_pkr": 0.0,
+            "equity_net_pkr": 0.0,
+            "fund_gross_pkr": 0.0,
+            "fund_net_pkr": 0.0,
+            "wht_pkr": 0.0,
+            "purification_pkr": 0.0,
+            "total_gross_pkr": 0.0,
+            "total_net_pkr": 0.0,
+            "events": [],
+        }
+        for i in range(12)
+    ]
+
+    if not txs:
+        return {
+            "portfolio_id": portfolio.id,
+            "filer_status": filer_status,
+            "annual_gross_pkr": 0.0,
+            "annual_net_pkr": 0.0,
+            "annual_wht_pkr": 0.0,
+            "annual_purification_pkr": 0.0,
+            "monthly_avg_net_pkr": 0.0,
+            "portfolio_forward_yield_pct": 0.0,
+            "portfolio_yield_on_cost_pct": 0.0,
+            "months": months_acc,
+        }
+
+    val = evaluate_portfolio(
+        transactions_to_events(txs),
+        usd_to_pkr=usd_to_pkr,
+        filer_status=filer_status,
+        auto_manage_cash=portfolio.auto_manage_cash,
+    )
+    open_holdings = [h for h in val.holdings if h.quantity > 0 and h.market_value_pkr > 0]
+    asset_ids = [h.asset_id for h in open_holdings]
+
+    assets_map: dict[str, Asset] = {}
+    if asset_ids:
+        loaded_assets = (
+            await db.execute(
+                select(Asset)
+                .options(
+                    selectinload(Asset.psx_profile),
+                    selectinload(Asset.mutual_fund_profile),
+                    selectinload(Asset.fixed_income_profile),
+                    selectinload(Asset.shariah_metric),
+                )
+                .where(Asset.id.in_(asset_ids))
+            )
+        ).scalars().all()
+        assets_map = {a.id: a for a in loaded_assets}
+
+    # Historical cash dividends from the last 24 months to infer exact payout months
+    cutoff_24m = date.today() - timedelta(days=735)
+    ca_by_asset: dict[str, list[CorporateAction]] = {}
+    if asset_ids:
+        ca_rows = (
+            await db.execute(
+                select(CorporateAction)
+                .where(
+                    CorporateAction.asset_id.in_(asset_ids),
+                    CorporateAction.action_type == "CASH_DIVIDEND",
+                    CorporateAction.ex_date >= cutoff_24m,
+                    CorporateAction.payout_per_share > 0,
+                )
+                .order_by(CorporateAction.ex_date.desc())
+            )
+        ).scalars().all()
+        for ca in ca_rows:
+            ca_by_asset.setdefault(ca.asset_id, []).append(ca)
+
+    for h in open_holdings:
+        asset = assets_map.get(h.asset_id)
+        if asset is None:
+            continue
+        fx = float(usd_to_pkr) if asset.currency == "USD" else 1.0
+        purif_pct = float(asset.shariah_metric.purification_rate_pct) if asset.shariah_metric else 0.0
+
+        # 1. Mutual Fund (Daily Dividend / Income / Cash) or Fixed Income NSS
+        mf = asset.mutual_fund_profile
+        fi = asset.fixed_income_profile
+        if mf is not None and (mf.is_daily_dividend or float(mf.annualized_yield_pct or 0) > 0):
+            ann_y = float(mf.annualized_yield_pct or mf.return_1y_pct or 0)
+            if ann_y > 0:
+                monthly_gross = float(h.market_value_pkr) * (ann_y / 100.0) / 12.0
+                monthly_wht = float(_dividend_wht_for_asset(D(str(monthly_gross)), asset, user))
+                monthly_net = max(0.0, monthly_gross - monthly_wht)
+                for m_idx in range(12):
+                    slot = months_acc[m_idx]
+                    slot["fund_gross_pkr"] += monthly_gross
+                    slot["fund_net_pkr"] += monthly_net
+                    slot["wht_pkr"] += monthly_wht
+                    slot["events"].append(
+                        {
+                            "symbol": asset.symbol,
+                            "name": asset.name,
+                            "source_type": "DAILY_DIV_FUND" if mf.is_daily_dividend else "INCOME_FUND",
+                            "gross_pkr": round(monthly_gross, 0),
+                            "net_pkr": round(monthly_net, 0),
+                        }
+                    )
+            continue
+
+        if fi is not None and float(fi.annual_profit_rate_pct or 0) > 0:
+            ann_r = float(fi.annual_profit_rate_pct)
+            monthly_gross = float(h.market_value_pkr) * (ann_r / 100.0) / 12.0
+            monthly_wht = 0.0 if fi.is_wht_exempt else float(_dividend_wht_for_asset(D(str(monthly_gross)), asset, user))
+            monthly_net = max(0.0, monthly_gross - monthly_wht)
+            for m_idx in range(12):
+                slot = months_acc[m_idx]
+                slot["fund_gross_pkr"] += monthly_gross
+                slot["fund_net_pkr"] += monthly_net
+                slot["wht_pkr"] += monthly_wht
+                slot["events"].append(
+                    {
+                        "symbol": asset.symbol,
+                        "name": asset.name,
+                        "source_type": "FIXED_INCOME",
+                        "gross_pkr": round(monthly_gross, 0),
+                        "net_pkr": round(monthly_net, 0),
+                    }
+                )
+            continue
+
+        # 2. Equities: map historical 12m ex-dividend months or fall back to trailing dividend yield
+        hist_cas = ca_by_asset.get(asset.id, [])
+        payout_by_month: dict[int, float] = {}
+        if hist_cas:
+            # Prefer most recent 12 months; if empty, take latest payout per calendar month from 24m window
+            cutoff_12m = date.today() - timedelta(days=366)
+            recent_12 = [c for c in hist_cas if c.ex_date >= cutoff_12m]
+            use_cas = recent_12 if recent_12 else hist_cas
+            seen_months: set[int] = set()
+            for ca in use_cas:
+                m_num = ca.ex_date.month
+                if recent_12:
+                    payout_by_month[m_num] = payout_by_month.get(m_num, 0.0) + float(ca.payout_per_share)
+                elif m_num not in seen_months:
+                    seen_months.add(m_num)
+                    payout_by_month[m_num] = float(ca.payout_per_share)
+
+        if not payout_by_month and asset.psx_profile and float(asset.psx_profile.dividend_yield_pct or 0) > 0:
+            dy = float(asset.psx_profile.dividend_yield_pct)
+            est_annual_dps = float(asset.last_price) * (dy / 100.0)
+            if est_annual_dps > 0:
+                # Standard Pakistan corporate semi-annual payout cadence (Mar & Sep)
+                payout_by_month = {3: est_annual_dps * 0.45, 9: est_annual_dps * 0.55}
+
+        for m_num, dps in payout_by_month.items():
+            gross_native = float(h.quantity) * dps
+            if gross_native <= 0:
+                continue
+            wht_native = float(_dividend_wht_for_asset(D(str(gross_native)), asset, user))
+            gross_pkr = gross_native * fx
+            wht_pkr = wht_native * fx
+            purif_pkr = gross_pkr * (purif_pct / 100.0)
+            net_pkr = max(0.0, gross_pkr - wht_pkr - purif_pkr)
+
+            slot = months_acc[m_num - 1]
+            slot["equity_gross_pkr"] += gross_pkr
+            slot["equity_net_pkr"] += net_pkr
+            slot["wht_pkr"] += wht_pkr
+            slot["purification_pkr"] += purif_pkr
+            slot["events"].append(
+                {
+                    "symbol": asset.symbol,
+                    "name": asset.name,
+                    "source_type": "EQUITY_DIVIDEND",
+                    "dps": round(dps, 2),
+                    "gross_pkr": round(gross_pkr, 0),
+                    "net_pkr": round(net_pkr, 0),
+                }
+            )
+
+    ann_gross = ann_net = ann_wht = ann_purif = 0.0
+    for slot in months_acc:
+        slot["equity_gross_pkr"] = round(slot["equity_gross_pkr"], 0)
+        slot["equity_net_pkr"] = round(slot["equity_net_pkr"], 0)
+        slot["fund_gross_pkr"] = round(slot["fund_gross_pkr"], 0)
+        slot["fund_net_pkr"] = round(slot["fund_net_pkr"], 0)
+        slot["wht_pkr"] = round(slot["wht_pkr"], 0)
+        slot["purification_pkr"] = round(slot["purification_pkr"], 0)
+        slot["total_gross_pkr"] = round(slot["equity_gross_pkr"] + slot["fund_gross_pkr"], 0)
+        slot["total_net_pkr"] = round(slot["equity_net_pkr"] + slot["fund_net_pkr"], 0)
+        slot["events"].sort(key=lambda e: e["net_pkr"], reverse=True)
+        ann_gross += slot["total_gross_pkr"]
+        ann_net += slot["total_net_pkr"]
+        ann_wht += slot["wht_pkr"]
+        ann_purif += slot["purification_pkr"]
+
+    total_mv = float(val.total_market_value_pkr)
+    total_cb = float(val.total_cost_basis_pkr)
+    return {
+        "portfolio_id": portfolio.id,
+        "filer_status": filer_status,
+        "annual_gross_pkr": round(ann_gross, 0),
+        "annual_net_pkr": round(ann_net, 0),
+        "annual_wht_pkr": round(ann_wht, 0),
+        "annual_purification_pkr": round(ann_purif, 0),
+        "monthly_avg_net_pkr": round(ann_net / 12.0, 0),
+        "portfolio_forward_yield_pct": round((ann_gross / total_mv) * 100.0, 2) if total_mv > 0 else 0.0,
+        "portfolio_yield_on_cost_pct": round((ann_gross / total_cb) * 100.0, 2) if total_cb > 0 else 0.0,
+        "months": months_acc,
+    }

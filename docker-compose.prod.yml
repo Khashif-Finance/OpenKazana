@@ -1,0 +1,125 @@
+# Production Multi-User SaaS / VPS Compose Stack with Automatic HTTPS via Caddy 2
+# Usage:
+#   1. cp .env.example .env && nano .env
+#      Set APP_DOMAIN, POSTGRES_PASSWORD, SECRET_KEY (>=32 chars), ADMIN_API_KEY, CORS_ORIGINS
+#   2. docker compose -f docker-compose.prod.yml up -d --build
+#
+# PostgreSQL and Redis stay strictly private inside the internal Docker network.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?Set APP_DOMAIN in .env (e.g. openkhazana.yourdomain.com)}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_started
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-openkhazana}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a strong POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-openkhazana}
+    volumes:
+      - pg_data_prod:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-openkhazana} -d ${POSTGRES_DB:-openkhazana}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis_data_prod:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      ENVIRONMENT: production
+      AUTH_MODE: ${AUTH_MODE:-multiuser}
+      COOKIE_SECURE: "true"
+      RATE_LIMIT_ENABLED: "true"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-openkhazana}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-openkhazana}
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: https://${APP_DOMAIN}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 --proxy-headers --forwarded-allow-ips='*'"
+
+  worker:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      ENVIRONMENT: production
+      AUTH_MODE: ${AUTH_MODE:-multiuser}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-openkhazana}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-openkhazana}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    volumes:
+      - scraper_dlq_prod:/tmp/scraper_dlq
+    command: arq app.workers.arq_worker.WorkerSettings
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        INTERNAL_API_BASE_URL: http://api:8000
+    restart: unless-stopped
+    environment:
+      INTERNAL_API_BASE_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  caddy_data:
+  caddy_config:
+  pg_data_prod:
+  redis_data_prod:
+  scraper_dlq_prod:

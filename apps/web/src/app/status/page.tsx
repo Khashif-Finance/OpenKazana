@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
-import { KeyRound, RefreshCw, ShieldAlert } from "lucide-react";
+import { Database, KeyRound, RefreshCw, ShieldAlert, ShieldCheck, Users } from "lucide-react";
 import { useAppContext } from "@/components/CurrencyContext";
 import { apiFetch } from "@/lib/api";
 
@@ -56,12 +56,35 @@ const SCRAPERS = [
   { name: "crypto_spot", label: "Crypto Spot" },
   { name: "pk_news", label: "Pakistan Financial News RSS" },
   { name: "psx_ipos", label: "PSX IPOs & Listings" },
+  { name: "brokerage_research", label: "5-Brokerage Research Reports" },
 ];
+
+interface AdminOverview {
+  version: string;
+  environment: string;
+  auth_mode: string;
+  database_connected: boolean;
+  database_dialect: string;
+  allow_public_registration: boolean;
+  rate_limit_enabled: boolean;
+  failed_scraper_runs: number;
+  table_counts: Record<string, number>;
+  users: Array<{
+    id: string;
+    email: string;
+    full_name: string;
+    is_admin: boolean;
+    is_active: boolean;
+    portfolio_count: number;
+    created_at: string;
+  }>;
+}
 
 export default function StatusPage() {
   const { user } = useAppContext();
   const [runs, setRuns] = useState<ScraperRun[]>([]);
   const [coverage, setCoverage] = useState<DataCoverage | null>(null);
+  const [adminOverview, setAdminOverview] = useState<AdminOverview | null>(null);
   const [busy, setBusy] = useState<string>("");
   const [syncSummary, setSyncSummary] = useState<string | null>(null);
   const [adminKey, setAdminKey] = useState("");
@@ -69,13 +92,52 @@ export default function StatusPage() {
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
 
   const loadStatus = useCallback(async () => {
-    const [data, cov] = await Promise.all([
+    const headers: Record<string, string> = {};
+    if (adminKey.trim()) headers["X-Admin-Key"] = adminKey.trim();
+    const [data, cov, adm] = await Promise.all([
       apiFetch<ScraperRun[]>("/api/v1/market/scraper-status"),
       apiFetch<DataCoverage>("/api/v1/market/coverage").catch(() => null),
+      apiFetch<AdminOverview>("/api/v1/admin/overview", { headers }).catch(() => null),
     ]);
     setRuns(data);
     if (cov) setCoverage(cov);
-  }, []);
+    if (adm) setAdminOverview(adm);
+  }, [adminKey]);
+
+  const handleToggleRegistration = async () => {
+    if (!adminOverview) return;
+    setError(null);
+    try {
+      const headers: Record<string, string> = {};
+      if (adminKey.trim()) headers["X-Admin-Key"] = adminKey.trim();
+      const res = await apiFetch<{ allow_public_registration: boolean }>("/api/v1/admin/settings", {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ allow_public_registration: !adminOverview.allow_public_registration }),
+      });
+      setAdminOverview((prev) =>
+        prev ? { ...prev, allow_public_registration: res.allow_public_registration } : prev,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update registration setting.");
+    }
+  };
+
+  const handleToggleUser = async (userId: string, patch: { is_active?: boolean; is_admin?: boolean }) => {
+    setError(null);
+    try {
+      const headers: Record<string, string> = {};
+      if (adminKey.trim()) headers["X-Admin-Key"] = adminKey.trim();
+      await apiFetch(`/api/v1/admin/users/${encodeURIComponent(userId)}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify(patch),
+      });
+      await loadStatus();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update user status.");
+    }
+  };
 
   useEffect(() => {
     loadStatus().catch(() => {});
@@ -303,6 +365,117 @@ export default function StatusPage() {
           </div>
         )}
       </div>
+
+      {/* SaaS Instance Health & User Administration Panel */}
+      {adminOverview && (
+        <div className="okz-card p-5 space-y-4 border-sky-500/30">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-bold flex items-center gap-1.5">
+                <Database className="w-4 h-4 text-sky-400" />
+                Instance Health &amp; SaaS Admin Control (v{adminOverview.version})
+              </h2>
+              <p className="text-xs okz-muted">
+                DB: <strong className="uppercase">{adminOverview.database_dialect}</strong>{" "}
+                ({adminOverview.database_connected ? "Connected" : "Error"}) &middot; Auth Mode:{" "}
+                <strong className="uppercase">{adminOverview.auth_mode}</strong> &middot; Rate Limiting:{" "}
+                <strong>{adminOverview.rate_limit_enabled ? "ON" : "OFF"}</strong>
+              </p>
+            </div>
+            <div className="flex items-center gap-2 text-xs">
+              {adminOverview.auth_mode === "multiuser" && (
+                <button
+                  type="button"
+                  onClick={handleToggleRegistration}
+                  className={`px-3 py-1.5 rounded-lg font-semibold border transition ${
+                    adminOverview.allow_public_registration
+                      ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-400"
+                      : "bg-amber-500/15 border-amber-500/40 text-amber-400"
+                  }`}
+                >
+                  Public Signups: {adminOverview.allow_public_registration ? "OPEN" : "INVITE ONLY"}
+                </button>
+              )}
+              <span className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-500/15 text-emerald-400 font-semibold">
+                <ShieldCheck className="w-3.5 h-3.5" /> Admin Verified
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-xs">
+            {Object.entries(adminOverview.table_counts).map(([tbl, cnt]) => (
+              <div key={tbl} className="p-2.5 rounded-lg bg-[var(--bg-elevated)] border border-[var(--border)]">
+                <div className="text-[10px] okz-muted uppercase">{tbl.replace(/_/g, " ")}</div>
+                <div className="font-mono font-bold text-sm mt-0.5">{cnt.toLocaleString()}</div>
+              </div>
+            ))}
+          </div>
+
+          {adminOverview.users.length > 0 && (
+            <div className="space-y-2 pt-2 border-t border-[var(--border)]">
+              <div className="text-xs font-bold flex items-center gap-1.5">
+                <Users className="w-3.5 h-3.5 text-emerald-500" />
+                Registered Accounts ({adminOverview.users.length})
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead className="border-b border-[var(--border)] okz-muted text-left">
+                    <tr>
+                      <th className="py-2 px-3">User</th>
+                      <th className="py-2 px-3">Role</th>
+                      <th className="py-2 px-3 text-right">Portfolios</th>
+                      <th className="py-2 px-3">Created</th>
+                      <th className="py-2 px-3 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--border)]">
+                    {adminOverview.users.map((u) => (
+                      <tr key={u.id} className="hover:bg-[var(--card-muted)]/40">
+                        <td className="py-2 px-3">
+                          <div className="font-semibold">{u.full_name}</div>
+                          <div className="text-[11px] okz-muted font-mono">{u.email}</div>
+                        </td>
+                        <td className="py-2 px-3">
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                              u.is_admin ? "bg-sky-500/15 text-sky-400" : "bg-[var(--card-muted)] okz-muted"
+                            }`}
+                          >
+                            {u.is_admin ? "ADMIN" : "USER"}
+                          </span>
+                          {!u.is_active && (
+                            <span className="ml-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/15 text-rose-400">
+                              DISABLED
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono">{u.portfolio_count}</td>
+                        <td className="py-2 px-3 okz-muted">{new Date(u.created_at).toLocaleDateString()}</td>
+                        <td className="py-2 px-3 text-right space-x-2">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleUser(u.id, { is_admin: !u.is_admin })}
+                            className="text-sky-400 hover:underline font-semibold"
+                          >
+                            {u.is_admin ? "Demote" : "Make Admin"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleToggleUser(u.id, { is_active: !u.is_active })}
+                            className={u.is_active ? "text-rose-400 hover:underline font-semibold" : "text-emerald-400 hover:underline font-semibold"}
+                          >
+                            {u.is_active ? "Disable" : "Enable"}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="okz-card overflow-x-auto">
         <table className="w-full text-sm">

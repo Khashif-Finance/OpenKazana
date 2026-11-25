@@ -10,6 +10,7 @@ import {
   ExternalLink,
   FileText,
   PieChart as PieChartIcon,
+  Printer,
   Repeat,
   ShieldCheck,
   Upload,
@@ -304,15 +305,35 @@ export default function MutualFundDetailPage() {
             <span>Upload NAV CSV/XLSX</span>
             <input type="file" accept=".csv,.xlsx,.xlsm" onChange={handleNavCsvUpload} disabled={busyUpload} className="hidden" />
           </label>
+          <button
+            type="button"
+            onClick={() => window.print()}
+            title="Print or Save Mutual Fund Fact Sheet PDF"
+            className="okz-no-print inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] hover:border-emerald-500 font-semibold"
+          >
+            <Printer className="w-3.5 h-3.5 text-emerald-500" />
+            <span>Print Fact Sheet</span>
+          </button>
           <select
             value={returnMode}
             onChange={(e) => setReturnMode(e.target.value as typeof returnMode)}
-            className="px-2.5 py-1.5 rounded-lg border border-[var(--border)] bg-[var(--bg)] font-semibold"
+            className="okz-no-print px-2.5 py-1.5 rounded-lg border border-[var(--border)] bg-[var(--bg)] font-semibold"
           >
             <option value="GROSS_TR">Gross Total Return</option>
             <option value="NET_FILER">Net After Filer WHT (15%)</option>
             <option value="PRICE">Raw Quoted NAV</option>
           </select>
+        </div>
+      </div>
+
+      {/* Print-Only Mutual Fund Fact Sheet Banner */}
+      <div className="okz-print-only border-b-2 border-emerald-700 pb-2 mb-3 text-xs">
+        <div className="flex justify-between items-baseline">
+          <strong className="text-base">OpenKhazana — SECP FMR Mutual Fund Fact Sheet</strong>
+          <span>Generated: {new Date().toLocaleDateString()}</span>
+        </div>
+        <div className="text-slate-600">
+          {fund.name} ({fund.symbol}) &middot; {fund.amc_name} &middot; {fund.fund_category}
         </div>
       </div>
 

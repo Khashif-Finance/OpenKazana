@@ -7,16 +7,18 @@ from contextlib import asynccontextmanager
 
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from sqlalchemy import update
+from sqlalchemy import text, update
 
+from app.api.admin import router as admin_router
 from app.api.analytics import router as analytics_router
 from app.api.auth import router as auth_router
 from app.api.calculators import router as calculators_router
 from app.api.hub import router as hub_router
 from app.api.market import router as market_router
+from app.api.markets_v8 import router as markets_v8_router
 from app.api.portfolio import router as portfolio_router
 from app.api.watchlists import router as watchlists_router
 from app.core.cache import api_cache
@@ -120,8 +122,10 @@ async def add_security_headers(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     return response
 
+app.include_router(admin_router)
 app.include_router(auth_router)
 app.include_router(hub_router)
+app.include_router(markets_v8_router)
 app.include_router(market_router)
 app.include_router(analytics_router)
 app.include_router(portfolio_router)
@@ -131,4 +135,18 @@ app.include_router(calculators_router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "openkhazana-api", "version": settings.app_version}
+    try:
+        async with async_session_factory() as db:
+            await db.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Database health check failed: {exc}",
+        ) from exc
+    return {
+        "status": "ok",
+        "database": "connected",
+        "service": "openkhazana-api",
+        "version": settings.app_version,
+        "auth_mode": settings.effective_auth_mode,
+    }

@@ -1,0 +1,33 @@
+# OpenKhazana Production Reverse Proxy (Automatic Let's Encrypt HTTPS)
+# Set APP_DOMAIN in .env (e.g., APP_DOMAIN=openkhazana.yourdomain.com)
+
+{$APP_DOMAIN} {
+    encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    # Route API, Health & OpenAPI Swagger directly to FastAPI
+    handle /api/* {
+        reverse_proxy api:8000
+    }
+    handle /health {
+        reverse_proxy api:8000
+    }
+    handle /docs* {
+        reverse_proxy api:8000
+    }
+    handle /openapi.json {
+        reverse_proxy api:8000
+    }
+
+    # Route all web UI pages & static assets to Next.js standalone server
+    handle {
+        reverse_proxy web:3000
+    }
+}

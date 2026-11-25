@@ -17,9 +17,11 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "OpenKhazana API"
-    app_version: str = "0.6.0"
+    app_version: str = "1.0.0"
     environment: str = "development"
     auth_mode: str = ""  # "local" (zero-login self-hosted) | "multiuser" (cloud/team auth) | "" (auto)
+    allow_public_registration: bool = True
+    rate_limit_enabled: bool = True
 
     database_url: str = "postgresql+asyncpg://openkhazana:openkhazana_dev_pw@localhost:5432/openkhazana"
     redis_url: str = "redis://localhost:6379/0"
@@ -96,3 +98,24 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+# Runtime admin toggle overrides (e.g. toggling public registration live from /status without restarting)
+_runtime_overrides: dict[str, Any] = {}
+
+
+def is_public_registration_allowed() -> bool:
+    settings = get_settings()
+    if settings.is_local_auth_mode:
+        return False
+    if "allow_public_registration" in _runtime_overrides:
+        return bool(_runtime_overrides["allow_public_registration"])
+    return bool(settings.allow_public_registration)
+
+
+def set_public_registration_allowed(allowed: bool) -> None:
+    _runtime_overrides["allow_public_registration"] = bool(allowed)
+
+
+def reset_runtime_overrides() -> None:
+    _runtime_overrides.clear()

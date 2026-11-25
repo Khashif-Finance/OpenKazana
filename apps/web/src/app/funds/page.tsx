@@ -29,6 +29,11 @@ import {
   ZAxis,
 } from "recharts";
 import { BarPoint, PriceChart } from "@/components/PriceChart";
+import {
+  AfterTaxSipComparatorPanel,
+  AmcLeaderboardPanel,
+  FmrHoldingsOverlapPanel,
+} from "@/components/MutualFundsLabPanels";
 import { TableSkeleton } from "@/components/Skeletons";
 import { apiFetch, apiFetchCached, invalidateApiCache } from "@/lib/api";
 import { formatNumber, formatPct, pctColorClass } from "@/lib/format";
@@ -124,6 +129,7 @@ export default function MutualFundsPage() {
   const [allScatterPoints, setAllScatterPoints] = useState<FundScatterPoint[]>([]);
   const [scatterRf, setScatterRf] = useState<number>(12.0);
   const [showScatter, setShowScatter] = useState<boolean>(true);
+  const [activeTab, setActiveTab] = useState<"directory" | "lab" | "sip" | "overlap">("directory");
 
   const [q, setQ] = useState("");
   const [amc, setAmc] = useState("");
@@ -155,6 +161,8 @@ export default function MutualFundsPage() {
       if (initialQ) setQ(initialQ);
       if (sp.get("daily_dividend") === "true") setDailyDividendOnly(true);
       if (sp.get("fmr_only") === "true") setFmrOnly(true);
+      const tab = sp.get("tab");
+      if (tab === "lab" || tab === "sip" || tab === "overlap") setActiveTab(tab);
     }
   }, []);
 
@@ -374,6 +382,51 @@ export default function MutualFundsPage() {
         </div>
       )}
 
+      {/* 4-Tab Mutual Funds Institutional Lab Switcher */}
+      <div className="flex flex-wrap items-center gap-1.5 border-b border-[var(--border)] pb-2 text-xs">
+        {(
+          [
+            ["directory", `Fund Directory & Frontier (${allFunds.length})`],
+            ["lab", "AMC Leaderboard & Champions"],
+            ["sip", "After-Tax & Fee SIP Lab"],
+            ["overlap", "SECP FMR Holdings Overlap"],
+          ] as const
+        ).map(([tabKey, label]) => (
+          <button
+            key={tabKey}
+            type="button"
+            onClick={() => setActiveTab(tabKey)}
+            className={`px-3.5 py-2 rounded-lg font-semibold transition ${
+              activeTab === tabKey
+                ? "bg-emerald-600 text-white shadow-sm"
+                : "bg-[var(--card)] border border-[var(--border)] okz-muted hover:text-[var(--text)] hover:border-emerald-500/50"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === "lab" && (
+        <AmcLeaderboardPanel
+          onPickAmc={(amcName) => {
+            setAmc(amcName);
+            setActiveTab("directory");
+          }}
+        />
+      )}
+
+      {activeTab === "sip" && (
+        <AfterTaxSipComparatorPanel
+          allFunds={allFunds}
+          initialSymbols={selected.length >= 2 ? selected : undefined}
+        />
+      )}
+
+      {activeTab === "overlap" && <FmrHoldingsOverlapPanel />}
+
+      {activeTab === "directory" && (
+      <>
       {/* 1-Click Smart Fund Presets */}
       <div className="flex flex-wrap items-center gap-1.5 text-xs">
         <span className="okz-muted mr-1 font-medium">Quick Presets:</span>
@@ -534,11 +587,20 @@ export default function MutualFundsPage() {
 
       {comparedFunds.length >= 2 && (
         <div className="okz-card p-5 space-y-3 border-emerald-500/40">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <h2 className="text-sm font-bold text-emerald-500">Side-by-Side Fund Comparison</h2>
-            <button onClick={() => setSelected([])} className="text-xs okz-muted hover:underline">
-              Clear
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setActiveTab("sip")}
+                className="text-xs font-semibold text-sky-400 hover:underline"
+              >
+                Run After-Tax &amp; Fee SIP Projection &rarr;
+              </button>
+              <button onClick={() => setSelected([])} className="text-xs okz-muted hover:underline">
+                Clear
+              </button>
+            </div>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             {comparedFunds.map((f) => (
@@ -817,6 +879,8 @@ export default function MutualFundsPage() {
             </tbody>
           </table>
         </div>
+      )}
+      </>
       )}
 
       {activeFund && (

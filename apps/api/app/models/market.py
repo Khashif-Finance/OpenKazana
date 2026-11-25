@@ -530,3 +530,36 @@ class IpoListing(Base):
     summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
     is_shariah_compliant: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+
+
+class ResearchReport(Base):
+    """
+    Aggregated Pakistan Brokerage Equity Research Reports & Corporate Briefing Notes
+    (Arif Habib Ltd, SCS Trade, Intermarket Securities, KASB/KTrade, Chase Securities)
+    plus user-bookmarked research links, auto-tagged to PSX tickers, sectors & stance/TP.
+    """
+
+    __tablename__ = "research_reports"
+    __table_args__ = (
+        Index("ix_research_published_broker", "published_at", "broker_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    url_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    broker_key: Mapped[str] = mapped_column(String(32), index=True, nullable=False)  # ahl | scs | ims | kasb | chase | custom
+    broker_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    title: Mapped[str] = mapped_column(String(400), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    url: Mapped[str] = mapped_column(String(700), nullable=False)
+    pdf_url: Mapped[str | None] = mapped_column(String(700), nullable=True)
+    report_type: Mapped[str] = mapped_column(String(40), default="COMPANY", index=True, nullable=False)
+    stance: Mapped[str | None] = mapped_column(String(24), nullable=True)  # BUY | HOLD | SELL | OVERWEIGHT | UNDERWEIGHT
+    target_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    matched_symbols_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    matched_sectors_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    is_user_bookmark: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    owner_user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)

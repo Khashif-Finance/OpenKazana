@@ -12,14 +12,20 @@ from decimal import Decimal
 from statistics import median
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import get_optional_user, get_usd_to_pkr_rate, resolve_asset_by_symbol
+from app.api.deps import (
+    get_optional_user,
+    get_usd_to_pkr_rate,
+    require_admin_or_api_key,
+    resolve_asset_by_symbol,
+)
 from app.core.cache import api_cache
 from app.core.database import get_db
+from app.core.rate_limit import enforce_rate_limit
 from app.models.market import (
     Asset,
     EquityFinancialPeriod,
@@ -132,8 +138,13 @@ async def get_macro_indicators(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/macro/refresh")
-async def refresh_macro_indicators(db: AsyncSession = Depends(get_db)):
-    """Trigger immediate live sync from PBS IMF-SDMX CPI + SBP EasyData/EcoData (Rates, FX Reserves, Remittances, BOP)."""
+async def refresh_macro_indicators(
+    request: Request,
+    _admin: User | None = Depends(require_admin_or_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    """Trigger immediate live sync from PBS IMF-SDMX CPI + SBP EasyData/EcoData (Admin / Local mode)."""
+    enforce_rate_limit(request, "macro_refresh", limit=6, window_seconds=60.0)
     count = await SbpMacroScraper().run(db)
     api_cache.invalidate_prefix("macro")
     api_cache.invalidate_prefix("overview")
@@ -913,6 +924,7 @@ async def mutual_funds_risk_return_scatter(
 @router.post("/funds/{symbol}/import-history")
 async def import_mutual_fund_nav_history(
     symbol: str,
+    request: Request,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
 ):
@@ -920,6 +932,7 @@ async def import_mutual_fund_nav_history(
     Upload CSV or XLSX historical NAV spreadsheet for any mutual fund / VPS pension fund
     (useful for AMCs such as Al Meezan / UBL / ABL that do not expose an open history API).
     """
+    enforce_rate_limit(request, "nav_upload", limit=10, window_seconds=60.0)
     asset = await resolve_asset_by_symbol(
         symbol,
         db,
@@ -992,6 +1005,7 @@ async def import_mutual_fund_nav_history(
 
 @router.post("/funds/fmr/upload")
 async def upload_secp_fmr_pdf(
+    request: Request,
     file: UploadFile = File(...),
     symbol: str | None = Query(default=None, description="Optional target fund symbol for single-fund FMR PDFs"),
     amc_hint: str = Query(default="", description="Optional AMC name hint for consolidated FMR booklets"),
@@ -1002,6 +1016,7 @@ async def upload_secp_fmr_pdf(
     (either a full multi-fund AMC booklet or a single-fund fact sheet) to parse & persist
     Asset Allocation, Top-10 Equity Holdings, Sector Mix, Credit Quality, WAM & TER breakdown.
     """
+    enforce_rate_limit(request, "fmr_upload", limit=10, window_seconds=60.0)
     raw = await file.read()
     if not raw or len(raw) > 25_000_000:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="PDF file is empty or exceeds 25MB limit.")
@@ -1676,7 +1691,7 @@ async def get_psx_market_heatmap(
     index_only: str = Query(default="ALL", description="ALL | KSE100 | KMI30"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Sarmaya.pk-style PSX Market Breadth + Market-Cap-Weighted Sector Treemap powered by Pandas."""
+    """OpenKhazana PSX Market Breadth + Market-Cap-Weighted Sector Treemap powered by Pandas."""
     idx_u = (index_only or "ALL").strip().upper()
 
     async def _load() -> dict[str, Any]:
@@ -1778,6 +1793,7 @@ async def export_stock_financial_reports_csv(
 @router.post("/stocks/{symbol}/reports/upload")
 async def upload_company_financial_report_pdf(
     symbol: str,
+    request: Request,
     file: UploadFile = File(...),
     period_type: str | None = Query(default=None, description="Optional hint: ANNUAL | QUARTERLY"),
     db: AsyncSession = Depends(get_db),
@@ -1786,6 +1802,7 @@ async def upload_company_financial_report_pdf(
     Drag-and-drop upload ANY company's Annual or Quarterly Financial Report PDF (PUCARS / Investor Relations)
     to parse 3-statement comparative tables, Auditor Opinion & Directors' Highlights into Pandas analytics.
     """
+    enforce_rate_limit(request, "report_upload", limit=10, window_seconds=60.0)
     asset = await resolve_asset_by_symbol(symbol, db, options=[selectinload(Asset.psx_profile)])
     if asset is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Asset '{symbol}' not found.")

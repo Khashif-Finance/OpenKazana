@@ -4,14 +4,15 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user, resolve_asset_by_symbol, set_auth_cookie_settings
-from app.core.config import get_settings
+from app.core.config import get_settings, is_public_registration_allowed
 from app.core.database import apply_rls_context, get_db
+from app.core.rate_limit import enforce_rate_limit
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.portfolio import (
     AlertRule,
@@ -90,22 +91,33 @@ async def auth_config():
     return AuthConfigOut(
         auth_mode=settings.effective_auth_mode,
         local_mode=local_mode,
-        allow_registration=not local_mode,
+        allow_registration=is_public_registration_allowed(),
         google_client_id=settings.google_client_id or None,
         demo_ttl_hours=settings.demo_ttl_hours,
     )
 
 
 @router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
-async def register(payload: RegisterRequest, response: Response, db: AsyncSession = Depends(get_db)):
+async def register(
+    payload: RegisterRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    enforce_rate_limit(request, "auth_register", limit=10, window_seconds=60.0)
     await apply_rls_context(db, bypass=True)
-    existing = (await db.execute(select(User).where(User.email == payload.email.lower()))).scalar_one_or_none()
-    if existing is not None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email is already registered.")
-
     admin_count = (
         await db.execute(select(func.count(User.id)).where(User.is_admin.is_(True), User.is_demo.is_(False)))
     ).scalar_one()
+    if admin_count > 0 and not is_public_registration_allowed():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public registration is disabled on this instance. Contact the workspace administrator.",
+        )
+
+    existing = (await db.execute(select(User).where(User.email == payload.email.lower()))).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email is already registered.")
 
     user = User(
         email=payload.email.lower(),
@@ -138,7 +150,13 @@ async def register(payload: RegisterRequest, response: Response, db: AsyncSessio
 
 
 @router.post("/login", response_model=AuthResponse)
-async def login(payload: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
+async def login(
+    payload: LoginRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    enforce_rate_limit(request, "auth_login", limit=15, window_seconds=60.0)
     stmt = (
         select(User)
         .options(selectinload(User.tax_profile), selectinload(User.preferences))

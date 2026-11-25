@@ -11,7 +11,7 @@ services:
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-openkhazana}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-openkhazana} -d ${POSTGRES_DB:-openkhazana}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -35,11 +35,13 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     env_file:
-      - .env.example
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-openkhazana}:${POSTGRES_PASSWORD:-openkhazana_dev_pw}@postgres:5432/${POSTGRES_DB:-openkhazana}
       REDIS_URL: redis://redis:6379/0
       AUTH_MODE: ${AUTH_MODE:-local}
+      ALLOW_PUBLIC_REGISTRATION: ${ALLOW_PUBLIC_REGISTRATION:-true}
     ports:
       - "8000:8000"
     depends_on:
@@ -47,6 +49,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     command: >
       sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
@@ -56,7 +63,8 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     env_file:
-      - .env.example
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-openkhazana}:${POSTGRES_PASSWORD:-openkhazana_dev_pw}@postgres:5432/${POSTGRES_DB:-openkhazana}
       REDIS_URL: redis://redis:6379/0
@@ -66,6 +74,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      api:
+        condition: service_healthy
     volumes:
       - scraper_dlq:/tmp/scraper_dlq
     command: arq app.workers.arq_worker.WorkerSettings
@@ -74,14 +84,16 @@ services:
     build:
       context: ./apps/web
       dockerfile: Dockerfile
+      args:
+        INTERNAL_API_BASE_URL: http://api:8000
     restart: unless-stopped
     environment:
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
       INTERNAL_API_BASE_URL: http://api:8000
     ports:
       - "3000:3000"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   pg_data:

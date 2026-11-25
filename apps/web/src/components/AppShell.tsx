@@ -5,14 +5,18 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Activity,
+  ArrowLeftRight,
   BarChart3,
   Bell,
+  BookOpen,
   Briefcase,
   Calculator,
   CalendarDays,
   ChevronDown,
+  Coins,
   Download,
   FileText,
+  Flame,
   GitCompareArrows,
   Globe2,
   Landmark,
@@ -25,10 +29,12 @@ import {
   Rocket,
   Search,
   Settings,
+  ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   Sun,
   TrendingUp,
+  Trophy,
   X,
 } from "lucide-react";
 import {
@@ -91,14 +97,14 @@ const NAV_GROUPS: NavGroup[] = [
     key: "markets",
     label: "Markets",
     icon: Globe2,
-    matchPrefixes: ["/", "/markets", "/analytics"],
+    matchPrefixes: ["/", "/markets/sectors", "/markets/ipos", "/markets/news", "/markets/calendar", "/analytics"],
     items: [
       { href: "/", label: "Market Overview & Heatmap", desc: "KSE-100, sector treemap, FX, gold & headlines", icon: BarChart3 },
       { href: "/markets/sectors", label: "Sectors & Industries", desc: "All 37 PSX sectors, median P/E & stock drilldown", icon: Layers },
       { href: "/markets/ipos", label: "IPOs & Developments", desc: "Main & GEM Board IPOs, post-IPO return & PUCARS", icon: Rocket },
       { href: "/markets/news", label: "Financial News", desc: "Business Recorder, Profit, Dawn, Tribune & Investing", icon: Newspaper },
       { href: "/markets/calendar", label: "Corporate Calendar", desc: "Ex-dividends, bonus/rights, board meetings & results", icon: CalendarDays },
-      { href: "/analytics", label: "Quant & Macro Lab", desc: "SBP/KIBOR yields, backtester & correlations", icon: TrendingUp },
+      { href: "/analytics", label: "Quant & Macro Lab", desc: "PBS CPI, SBP FX reserves, yields & backtester", icon: TrendingUp },
     ],
   },
   {
@@ -110,6 +116,7 @@ const NAV_GROUPS: NavGroup[] = [
       { href: "/stocks", label: "PSX & Global Directory", desc: "Search 500+ PSX & international equities", icon: PieChart },
       { href: "/screener", label: "Technical Screener", desc: "RSI, MACD, Supertrend & Piotroski F-Score filters", icon: SlidersHorizontal },
       { href: "/stocks/compare", label: "Compare Stocks", desc: "Head-to-head 2–5 stock chart & valuation matrix", icon: GitCompareArrows },
+      { href: "/stocks/research", label: "Brokerage Research Reports", desc: "AHL, SCS, IMS, KASB & Chase reports tagged to stocks", icon: BookOpen },
       { href: "/stocks/downloads", label: "Filings & Downloads", desc: "1-click PUCARS PDFs, annual reports & CSV exports", icon: Download },
     ],
   },
@@ -122,6 +129,18 @@ const NAV_GROUPS: NavGroup[] = [
       { href: "/funds", label: "MUFAP & VPS Directory", desc: "330+ funds, Sharpe ratio & risk-return scatter", icon: Landmark },
       { href: "/funds?daily_dividend=true", label: "Daily Dividend Funds", desc: "Cash & money market daily payout yield tracker", icon: Sparkles },
       { href: "/funds?fmr_only=true", label: "SECP FMR Explorer", desc: "Monthly asset allocation, WAM & top-10 holdings", icon: FileText },
+      { href: "/funds?tab=lab", label: "AMC Leaderboard & Overlap", desc: "AMC rankings, after-tax SIP & FMR holdings overlap", icon: Trophy },
+    ],
+  },
+  {
+    key: "fx_commodities",
+    label: "FX & Commodities",
+    icon: Coins,
+    matchPrefixes: ["/markets/forex", "/markets/commodities", "/markets/fixed-income"],
+    items: [
+      { href: "/markets/forex", label: "Forex & Remittance Hub", desc: "PKR ↔ 14 FCY corridors, Interbank vs Open & majors", icon: ArrowLeftRight },
+      { href: "/markets/commodities", label: "PMEX & Commodities", desc: "Gold Tola, Brent, WTI, Silver, Cotton & PMEX lots", icon: Flame },
+      { href: "/markets/fixed-income", label: "Fixed Income, NSS & Sukuk", desc: "SBP T-Bills/PIBs, GoP Ijarah Sukuk, CDNS NSS & RDA", icon: ShieldCheck },
     ],
   },
   {
@@ -135,16 +154,11 @@ const NAV_GROUPS: NavGroup[] = [
       { href: "/calculators", label: "Tax & SIP Calculators", desc: "FBR Sec 37A CGT, Zakat & wealth compounding", icon: Calculator },
     ],
   },
-  {
-    key: "settings",
-    label: "Settings",
-    icon: Settings,
-    matchPrefixes: ["/settings", "/status"],
-    items: [
-      { href: "/settings", label: "Workspace & Tax Settings", desc: "FBR ATL, Shariah default, broker bps & JSON backup", icon: Settings },
-      { href: "/status", label: "Data Pipeline & Sync", desc: "Live scraper telemetry, coverage & manual refresh", icon: Activity },
-    ],
-  },
+];
+
+const SETTINGS_UTILITY_ITEMS: NavSubItem[] = [
+  { href: "/settings", label: "Workspace & Tax Settings", desc: "FBR ATL, Shariah default, broker bps & JSON backup", icon: Settings },
+  { href: "/status", label: "Data Pipeline & Sync", desc: "Live scraper telemetry, coverage & manual refresh", icon: Activity },
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -434,6 +448,55 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
 
+            {/* Quick Settings & Pipeline Gear Dropdown */}
+            <div
+              className="relative hidden sm:block"
+              onMouseEnter={() => setOpenMenu("settings_util")}
+              onMouseLeave={() => setOpenMenu((cur) => (cur === "settings_util" ? null : cur))}
+            >
+              <button
+                type="button"
+                onClick={() => setOpenMenu((cur) => (cur === "settings_util" ? null : "settings_util"))}
+                aria-label="Settings and Pipeline Status"
+                title="Workspace Settings & Data Pipeline Status"
+                className={`p-2 rounded-md border transition ${
+                  pathname.startsWith("/settings") || pathname.startsWith("/status") || openMenu === "settings_util"
+                    ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-400"
+                    : "border-[var(--border)] hover:bg-[var(--card-muted)]"
+                }`}
+              >
+                <Settings className="w-4 h-4" />
+              </button>
+              {openMenu === "settings_util" && (
+                <div className="absolute right-0 top-full pt-1.5 z-50 w-68">
+                  <div className="okz-card p-2 shadow-2xl border border-[var(--border)] bg-[var(--card)] space-y-0.5">
+                    {SETTINGS_UTILITY_ITEMS.map((sub) => {
+                      const SubIcon = sub.icon;
+                      const subActive = pathname === sub.href;
+                      return (
+                        <Link
+                          key={sub.href}
+                          href={sub.href}
+                          onClick={() => setOpenMenu(null)}
+                          className={`flex items-start gap-2.5 p-2.5 rounded-lg transition ${
+                            subActive
+                              ? "bg-emerald-500/15 text-emerald-400"
+                              : "hover:bg-[var(--card-muted)] text-[var(--text)]"
+                          }`}
+                        >
+                          <SubIcon className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+                          <div className="min-w-0">
+                            <div className="text-xs font-semibold leading-tight">{sub.label}</div>
+                            <div className="text-[11px] okz-muted leading-snug mt-0.5">{sub.desc}</div>
+                          </div>
+                        </Link>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
             {user && (
               <Link
                 href="/watchlists"
@@ -546,6 +609,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 </div>
               );
             })}
+
+            <div className="border border-[var(--border)] rounded-lg p-1.5 space-y-0.5">
+              {SETTINGS_UTILITY_ITEMS.map((sub) => {
+                const SubIcon = sub.icon;
+                return (
+                  <Link
+                    key={sub.href}
+                    href={sub.href}
+                    onClick={() => setMobileOpen(false)}
+                    className="flex items-center gap-2.5 px-3 py-2 rounded-md text-xs font-medium hover:bg-[var(--card-muted)]"
+                  >
+                    <SubIcon className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                    <span>{sub.label}</span>
+                  </Link>
+                );
+              })}
+            </div>
 
             {!localMode && (
               <div className="pt-2 border-t border-[var(--border)] flex items-center justify-between gap-2">
@@ -685,12 +765,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-6">{children}</main>
 
       <footer className="border-t border-[var(--border)] py-6 px-4 text-xs okz-muted">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between gap-2">
-          <span>
-            OpenKhazana — Open-source (Apache-2.0) Pakistan Market Hub &amp; Portfolio Tracker
-            {localMode ? " · Local Self-Hosted Mode" : " · Multi-User Cloud Mode"}
-          </span>
-          <span>Informational &amp; tracking purposes only. Verify FBR CGT/Zakat &amp; Shariah screenings independently.</span>
+        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span>
+              Built by <strong className="text-[var(--text)]">Khashif Sarfraz</strong> with{" "}
+              <strong className="text-emerald-500">Gemini</strong>
+            </span>
+            <span>&middot;</span>
+            <a
+              href="https://github.com/Khashif-Finance/OpenKhazana"
+              target="_blank"
+              rel="noreferrer"
+              className="text-emerald-500 hover:underline font-medium"
+            >
+              OpenKhazana (Apache-2.0)
+            </a>
+            <span>&middot;</span>
+            <span>{localMode ? "Local Self-Hosted Mode" : "Multi-User Cloud Mode"}</span>
+          </div>
+          <span>Informational &amp; analytical purposes only. Verify FBR CGT/Zakat, NSS &amp; Shariah screenings independently.</span>
         </div>
       </footer>
     </div>

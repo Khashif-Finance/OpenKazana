@@ -7,7 +7,7 @@ on:
 
 jobs:
   backend:
-    name: Backend Lint & Pytest
+    name: Backend Lint, Alembic Migrations & Pytest
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -17,7 +17,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
           cache: "pip"
           cache-dependency-path: apps/api/pyproject.toml
 
@@ -29,11 +29,19 @@ jobs:
       - name: Ruff lint
         run: ruff check --config pyproject.toml .
 
+      - name: Verify clean Alembic migration chain
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///./ci_migration_check.db
+          ENVIRONMENT: test
+        run: |
+          alembic upgrade head
+          rm -f ci_migration_check.db
+
       - name: Run unit and integration tests
         run: pytest tests -v
 
   frontend:
-    name: Frontend Typecheck, Lint & Build
+    name: Frontend Typecheck & Production Build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -53,5 +61,6 @@ jobs:
 
       - name: Next.js production build
         env:
+          INTERNAL_API_BASE_URL: http://localhost:8000
           NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
         run: npm run build

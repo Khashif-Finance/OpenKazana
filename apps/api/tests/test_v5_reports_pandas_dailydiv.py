@@ -343,7 +343,7 @@ async def test_v5_api_reports_heatmap_and_live_daily_dividend_accrual(monkeypatc
             await db.commit()
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            # 1. Sarmaya-style Market Heatmap & Breadth
+            # 1. Interactive PSX Market Heatmap & Breadth
             hm = (await client.get("/api/v1/market/heatmap")).json()
             assert hm["breadth"]["advancers"] == 1
             assert hm["sectors"][0]["sector"] == "Cement"

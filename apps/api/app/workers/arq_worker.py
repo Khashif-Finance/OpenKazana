@@ -15,6 +15,7 @@ from app.models.market import ScraperRun
 from app.models.user import User
 from app.scrapers.amc_navs import MufapHistoricalNavScraper
 from app.scrapers.base import ScraperParseError, _dump_dlq_payload, is_psx_market_open
+from app.scrapers.brokerage_research import BrokerageResearchScraper
 from app.scrapers.crypto import CryptoSpotScraper
 from app.scrapers.financial_reports import PsxFinancialReportsScraper
 from app.scrapers.fmr_parser import FmrReportScraper
@@ -51,6 +52,7 @@ SCRAPER_REGISTRY = {
     "intl_stocks": IntlStocksScraper,
     "pk_news": PakistanNewsScraper,
     "psx_ipos": PsxIpoAndListingsScraper,
+    "brokerage_research": BrokerageResearchScraper,
 }
 
 
@@ -70,9 +72,9 @@ async def sync_all_live_sources(
 ) -> list[ScraperRun]:
     """Run core live market scrapers sequentially and optionally append EOD/deep backfill steps."""
     if light_only:
-        pipeline = ["fx_gold", "sbp_macro", "psx_intraday", "crypto_spot", "pk_news", "psx_ipos"]
+        pipeline = ["fx_gold", "sbp_macro", "psx_intraday", "crypto_spot", "pk_news", "psx_ipos", "brokerage_research"]
     else:
-        pipeline = ["fx_gold", "sbp_macro", "psx_intraday", "crypto_spot", "mufap_nav", "intl_stocks", "pk_news", "psx_ipos", "psx_fundamentals"]
+        pipeline = ["fx_gold", "sbp_macro", "psx_intraday", "crypto_spot", "mufap_nav", "intl_stocks", "pk_news", "psx_ipos", "brokerage_research", "psx_fundamentals"]
     if include_eod:
         pipeline.append("psx_eod_history")
     if include_deep_backfill:

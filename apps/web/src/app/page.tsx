@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, Download, ExternalLink, Megaphone, Newspaper, RefreshCw, ShieldCheck, TrendingDown, TrendingUp } from "lucide-react";
 import { useAppContext } from "@/components/CurrencyContext";
+import { IndexMoversCard } from "@/components/IndexMoversCard";
 import { MarketHeatmap } from "@/components/MarketHeatmap";
 import { BarPoint, PriceChart } from "@/components/PriceChart";
 import { ChartSkeleton, KpiGridSkeleton } from "@/components/Skeletons";
@@ -287,6 +288,8 @@ export default function MarketHubPage() {
       </section>
 
       <MarketHeatmap />
+
+      <IndexMoversCard />
 
       {indexBars.length > 0 && (
         <section className="okz-card p-5 space-y-3">

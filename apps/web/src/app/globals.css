@@ -69,3 +69,54 @@ table th {
 .okz-ticker-track:hover {
   animation-play-state: paused;
 }
+
+/* Institutional Tear-Sheet PDF / Print Layout */
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 12mm;
+  }
+
+  html,
+  html.dark,
+  body {
+    background: #ffffff !important;
+    color: #0b1324 !important;
+    --bg: #ffffff;
+    --bg-elevated: #f8fafc;
+    --card: #ffffff;
+    --card-muted: #f1f5f9;
+    --text: #0b1324;
+    --text-muted: #475569;
+    --border: #cbd5e1;
+  }
+
+  header,
+  footer,
+  nav,
+  .okz-no-print,
+  .okz-ticker-track {
+    display: none !important;
+  }
+
+  main {
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .okz-card {
+    box-shadow: none !important;
+    border-color: #cbd5e1 !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .okz-print-only {
+    display: block !important;
+  }
+}
+
+.okz-print-only {
+  display: none;
+}

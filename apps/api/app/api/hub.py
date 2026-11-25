@@ -11,23 +11,32 @@ OpenKhazana v6 Market Hub API Router:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import re
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 from urllib.parse import quote, urlparse
 
 import httpx
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import get_optional_user, resolve_asset_by_symbol
+from app.api.deps import (
+    get_current_user,
+    get_optional_user,
+    require_admin_or_api_key,
+    resolve_asset_by_symbol,
+)
 from app.core.cache import api_cache
 from app.core.database import get_db
+from app.core.rate_limit import enforce_rate_limit
 from app.models.market import (
     Announcement,
     Asset,
@@ -37,9 +46,15 @@ from app.models.market import (
     IpoListing,
     NewsArticle,
     PriceBar,
+    ResearchReport,
 )
 from app.models.portfolio import Portfolio, Transaction, Watchlist, WatchlistItem
 from app.models.user import User
+from app.scrapers.brokerage_research import (
+    BROKERAGE_PORTALS,
+    BrokerageResearchScraper,
+    extract_stance_and_tp,
+)
 from app.scrapers.pk_news import PakistanNewsScraper
 from app.scrapers.psx_ipos import PSX_IPO_GUIDES, PsxIpoAndListingsScraper
 from app.services.pandas_analytics import (
@@ -65,6 +80,16 @@ ALLOWED_PDF_HOSTS = {
     "nbpfunds.com",
     "www.ublfunds.com.pk",
     "www.mcbfunds.com",
+    "www.arifhabibltd.com",
+    "arifhabibltd.com",
+    "www.scstrade.com",
+    "scstrade.com",
+    "www.kasb.com",
+    "kasb.com",
+    "chasesecurities.com",
+    "www.chasesecurities.com",
+    "imsecurities.com.pk",
+    "www.imsecurities.com.pk",
 }
 
 
@@ -240,8 +265,13 @@ async def stock_and_sector_news(
 
 
 @router.post("/news/refresh")
-async def refresh_market_news(db: AsyncSession = Depends(get_db)):
-    """Trigger an immediate live RSS refresh across Pakistan financial news publications."""
+async def refresh_market_news(
+    request: Request,
+    _admin: User | None = Depends(require_admin_or_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    """Trigger an immediate live RSS refresh across Pakistan financial news publications (Admin / Local mode)."""
+    enforce_rate_limit(request, "news_refresh", limit=6, window_seconds=60.0)
     added = await PakistanNewsScraper().run(db)
     api_cache.invalidate_prefix("news:")
     api_cache.invalidate_prefix("ipos:")
@@ -1070,10 +1100,12 @@ async def list_downloadable_filings(
 
 @router.get("/downloads/proxy")
 async def proxy_download_official_pdf(
+    request: Request,
     url: str = Query(..., min_length=10, max_length=700),
     filename: str = Query(default="openkhazana_document.pdf", max_length=140),
 ):
     """SSRF-safe allowlisted PDF download proxy adding Content-Disposition: attachment for 1-click downloads."""
+    enforce_rate_limit(request, "downloads_proxy", limit=40, window_seconds=60.0)
     parsed = urlparse(url.strip())
     host = (parsed.hostname or "").lower()
     if parsed.scheme not in {"https", "http"} or host not in ALLOWED_PDF_HOSTS:
@@ -1114,3 +1146,257 @@ async def proxy_download_official_pdf(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Unable to download document from upstream host: {exc}",
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# 7. PAKISTAN BROKERAGE EQUITY RESEARCH REPORTS HUB (AHL, SCS, IMS, KASB, CHASE)
+# ---------------------------------------------------------------------------
+
+
+def _serialize_research(rep: ResearchReport) -> dict[str, Any]:
+    pdf_proxy = None
+    if rep.pdf_url:
+        parsed_pdf = urlparse(rep.pdf_url)
+        if (parsed_pdf.hostname or "").lower() in ALLOWED_PDF_HOSTS:
+            fname = _sanitize_filename(f"{rep.broker_key}_{rep.title[:48]}")
+            pdf_proxy = f"/api/v1/market/downloads/proxy?url={quote(rep.pdf_url, safe='')}&filename={quote(fname, safe='')}"
+    return {
+        "id": rep.id,
+        "broker_key": rep.broker_key,
+        "broker_name": rep.broker_name,
+        "title": rep.title,
+        "summary": rep.summary,
+        "url": rep.url,
+        "pdf_url": rep.pdf_url,
+        "proxy_download_url": pdf_proxy,
+        "report_type": rep.report_type,
+        "stance": rep.stance,
+        "target_price": float(rep.target_price) if rep.target_price is not None else None,
+        "matched_symbols": list(rep.matched_symbols_json or []),
+        "matched_sectors": list(rep.matched_sectors_json or []),
+        "published_at": rep.published_at.isoformat(),
+        "is_user_bookmark": bool(rep.is_user_bookmark),
+        "owner_user_id": rep.owner_user_id,
+    }
+
+
+async def _get_recent_research_cached(db: AsyncSession) -> list[dict[str, Any]]:
+    async def _load() -> list[dict[str, Any]]:
+        rows = (
+            await db.execute(
+                select(ResearchReport).order_by(ResearchReport.published_at.desc()).limit(300)
+            )
+        ).scalars().all()
+        return [_serialize_research(r) for r in rows]
+
+    return await api_cache.get_or_set("research:recent_300", 120.0, _load)
+
+
+def _visible_research_rows(rows: list[dict[str, Any]], user: User | None) -> list[dict[str, Any]]:
+    """Keep public brokerage reports visible to all and scope custom bookmarks to their owning user."""
+    uid = user.id if user else None
+    out: list[dict[str, Any]] = []
+    for rep in rows:
+        owner = rep.get("owner_user_id")
+        if owner is None or (uid is not None and owner == uid):
+            out.append({k: v for k, v in rep.items() if k != "owner_user_id"})
+    return out
+
+
+@router.get("/research")
+async def list_brokerage_research_reports(
+    broker: str | None = Query(default=None),
+    symbol: str | None = Query(default=None),
+    sector: str | None = Query(default=None),
+    report_type: str | None = Query(default=None),
+    q: str = Query(default=""),
+    limit: int = Query(default=100, ge=1, le=250),
+    user: User | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Browse live & bookmarked Pakistan brokerage equity research reports auto-tagged to PSX tickers & sectors."""
+    rows = _visible_research_rows(await _get_recent_research_cached(db), user)
+
+    b_l = broker.strip().lower() if broker and broker.strip() and broker.upper() != "ALL" else None
+    sym_u = symbol.strip().upper() if symbol and symbol.strip() else None
+    sec_l = sector.strip().lower() if sector and sector.strip() and sector.upper() != "ALL" else None
+    rt_u = report_type.strip().upper() if report_type and report_type.strip() and report_type.upper() != "ALL" else None
+    q_l = q.strip().lower()
+
+    broker_counts: dict[str, dict[str, Any]] = {}
+    type_counts: dict[str, int] = {}
+    sector_counts: dict[str, int] = {}
+    filtered: list[dict[str, Any]] = []
+
+    for rep in rows:
+        bc = broker_counts.setdefault(
+            rep["broker_key"],
+            {"broker_key": rep["broker_key"], "broker_name": rep["broker_name"], "count": 0},
+        )
+        bc["count"] += 1
+        type_counts[rep["report_type"]] = type_counts.get(rep["report_type"], 0) + 1
+        for s in rep["matched_sectors"]:
+            sector_counts[s] = sector_counts.get(s, 0) + 1
+
+        if b_l and rep["broker_key"].lower() != b_l:
+            continue
+        if rt_u and rep["report_type"].upper() != rt_u:
+            continue
+        if sym_u:
+            syms = [str(x).upper() for x in rep["matched_symbols"]]
+            if sym_u not in syms and sym_u not in rep["title"].upper():
+                continue
+        if sec_l:
+            secs = [str(x).lower() for x in rep["matched_sectors"]]
+            if not any(sec_l in s for s in secs):
+                continue
+        if q_l and q_l not in rep["title"].lower() and q_l not in (rep["summary"] or "").lower() and q_l not in rep["broker_name"].lower():
+            continue
+        filtered.append(rep)
+
+    return {
+        "total": len(filtered),
+        "items": filtered[:limit],
+        "brokers": sorted(broker_counts.values(), key=lambda x: x["count"], reverse=True),
+        "report_types": [{"type": k, "count": v} for k, v in sorted(type_counts.items(), key=lambda kv: kv[1], reverse=True)],
+        "sectors": [{"sector": k, "count": v} for k, v in sorted(sector_counts.items(), key=lambda kv: kv[1], reverse=True)[:20]],
+        "portals": BROKERAGE_PORTALS,
+    }
+
+
+@router.get("/stocks/{symbol}/research")
+async def stock_and_sector_brokerage_research(
+    symbol: str,
+    limit: int = Query(default=20, ge=1, le=50),
+    user: User | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return stock-specific AND sector-specific brokerage research reports for `/stocks/[symbol]`."""
+    asset = await resolve_asset_by_symbol(symbol, db, owner_user_id=user.id if user else None)
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Asset '{symbol}' not found.")
+
+    rows = _visible_research_rows(await _get_recent_research_cached(db), user)
+    sym_u = asset.symbol.upper()
+    name_stem = re.sub(r"\b(limited|ltd\.?|company|corporation|pakistan)\b", "", asset.name.lower()).strip()
+    sec_u = (asset.sector_or_category or "").strip().upper()
+
+    stock_reports: list[dict[str, Any]] = []
+    sector_reports: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    for rep in rows:
+        syms = [str(x).upper() for x in rep["matched_symbols"]]
+        is_stock = sym_u in syms or (len(name_stem) >= 6 and name_stem in rep["title"].lower())
+        if is_stock:
+            stock_reports.append(rep)
+            seen_ids.add(rep["id"])
+            continue
+        secs = [str(x).upper() for x in rep["matched_sectors"]]
+        if sec_u and any(sec_u == s or sec_u in s or s in sec_u for s in secs):
+            if rep["id"] not in seen_ids:
+                sector_reports.append(rep)
+
+    return {
+        "symbol": asset.symbol,
+        "name": asset.name,
+        "sector": asset.sector_or_category,
+        "stock_reports": stock_reports[:limit],
+        "sector_reports": sector_reports[:limit],
+        "portals": BROKERAGE_PORTALS,
+    }
+
+
+@router.post("/research/refresh")
+async def refresh_brokerage_research(
+    request: Request,
+    _admin: User | None = Depends(require_admin_or_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    """Trigger immediate live refresh across Pakistan brokerage research feeds (Admin / Local mode)."""
+    enforce_rate_limit(request, "research_refresh", limit=6, window_seconds=60.0)
+    added = await BrokerageResearchScraper().run(db)
+    api_cache.invalidate_prefix("research:")
+    return {"ok": True, "reports_added": added}
+
+
+class ResearchBookmarkCreate(BaseModel):
+    title: str = Field(..., min_length=3, max_length=380)
+    url: str = Field(..., min_length=8, max_length=690)
+    broker_name: str = Field(default="Custom Brokerage / Analyst", max_length=120)
+    broker_key: str = Field(default="custom", max_length=32)
+    report_type: str = Field(default="COMPANY", max_length=40)
+    symbols: list[str] = Field(default_factory=list)
+    sectors: list[str] = Field(default_factory=list)
+    stance: str | None = Field(default=None, max_length=24)
+    target_price: float | None = Field(default=None, gt=0)
+    summary: str = Field(default="", max_length=700)
+
+
+@router.post("/research/bookmark", status_code=status.HTTP_201_CREATED)
+async def create_research_bookmark(
+    payload: ResearchBookmarkCreate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Save a custom brokerage research link or PDF report tagged to specific PSX stocks/sectors."""
+    parsed = urlparse(payload.url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Report URL must be a valid http(s) link.")
+
+    clean_url = payload.url.strip()
+    u_hash = hashlib.sha256(f"{user.id}:{clean_url}".encode("utf-8")).hexdigest()
+    existing = (await db.execute(select(ResearchReport).where(ResearchReport.url_hash == u_hash))).scalar_one_or_none()
+    if existing is not None:
+        return {k: v for k, v in _serialize_research(existing).items() if k != "owner_user_id"}
+
+    auto_stance, auto_tp = extract_stance_and_tp(payload.title, payload.summary)
+    stance_final = (payload.stance.strip().upper() if payload.stance and payload.stance.strip() else auto_stance)
+    tp_final = Decimal(str(round(payload.target_price, 2))) if payload.target_price else auto_tp
+    syms = sorted({s.strip().upper() for s in payload.symbols if s.strip()})[:10]
+    secs = sorted({s.strip() for s in payload.sectors if s.strip()})[:6]
+    is_pdf = clean_url.lower().endswith(".pdf")
+
+    rep = ResearchReport(
+        url_hash=u_hash,
+        broker_key=(payload.broker_key.strip().lower() or "custom")[:32],
+        broker_name=payload.broker_name.strip() or "Custom Brokerage",
+        title=payload.title.strip(),
+        summary=payload.summary.strip(),
+        url=clean_url,
+        pdf_url=clean_url if is_pdf else None,
+        report_type=(payload.report_type.strip().upper() or "COMPANY")[:40],
+        stance=stance_final,
+        target_price=tp_final,
+        matched_symbols_json=syms,
+        matched_sectors_json=secs,
+        published_at=datetime.now(timezone.utc),
+        is_user_bookmark=True,
+        owner_user_id=user.id,
+    )
+    db.add(rep)
+    await db.commit()
+    await db.refresh(rep)
+    api_cache.invalidate_prefix("research:")
+    return {k: v for k, v in _serialize_research(rep).items() if k != "owner_user_id"}
+
+
+@router.delete("/research/bookmark/{report_id}")
+async def delete_research_bookmark(
+    report_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    rep = (
+        await db.execute(
+            select(ResearchReport).where(ResearchReport.id == report_id, ResearchReport.is_user_bookmark.is_(True))
+        )
+    ).scalar_one_or_none()
+    if rep is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Custom research bookmark not found.")
+    if rep.owner_user_id and rep.owner_user_id != user.id and not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only delete your own research bookmarks.")
+    await db.delete(rep)
+    await db.commit()
+    api_cache.invalidate_prefix("research:")
+    return {"ok": True}

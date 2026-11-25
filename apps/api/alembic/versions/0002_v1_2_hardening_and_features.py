@@ -23,10 +23,15 @@ def upgrade() -> None:
     op.add_column("users", sa.Column("is_admin", sa.Boolean(), nullable=False, server_default=sa.false()))
     op.add_column("users", sa.Column("demo_expires_at", sa.DateTime(timezone=True), nullable=True))
 
-    op.add_column(
-        "assets",
-        sa.Column("owner_user_id", sa.String(length=36), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=True),
-    )
+    if is_pg:
+        op.add_column(
+            "assets",
+            sa.Column("owner_user_id", sa.String(length=36), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=True),
+        )
+    else:
+        with op.batch_alter_table("assets") as batch_op:
+            batch_op.add_column(sa.Column("owner_user_id", sa.String(length=36), nullable=True))
+            batch_op.create_foreign_key("fk_assets_owner_user_id", "users", ["owner_user_id"], ["id"], ondelete="CASCADE")
     op.create_index("ix_assets_owner_user_id", "assets", ["owner_user_id"])
 
     if is_pg:
