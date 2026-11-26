@@ -1,6 +1,5 @@
 # OpenKhazana Screenshots Drop-In Folder
 
-Save PNG/WebP screenshots using the filenames below, then uncomment the corresponding image links in the root [`README.md`](../../README.md#screenshots):
 
 | Filename | Recommended Page & View |
 |---|---|
