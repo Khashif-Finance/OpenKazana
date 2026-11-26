@@ -34,33 +34,33 @@ Run it locally in **zero-login SQLite mode** in under a minute, or deploy it on 
 
 ### 1. Market Overview, KSE-100 Index Point Contributors & Sector Treemap (`/`)
 > **[ Screenshot Placeholder — `docs/screenshots/01-market-overview.png` ]**
-<!-- ![Market Overview & KSE-100 Movers](docs/screenshots/01-market-overview.png) -->
+ ![Market Overview & KSE-100 Movers](docs/screenshots/01-market-overview.png) 
 
 ### 2. Tabbed Equity Workbench, Technical Speedometer & Pandas 3-Statement Financials (`/stocks/[symbol]`)
 > **[ Screenshot Placeholder — `docs/screenshots/02-stock-workbench.png` ]**
-<!-- ![Stock Workbench & Financials](docs/screenshots/02-stock-workbench.png) -->
+![Stock Workbench & Financials](docs/screenshots/02-stock-workbench.png) 
 
 ### 3. 5-Brokerage Equity Research Hub — AHL, SCS, IMS, KASB & Chase (`/stocks/research`)
 > **[ Screenshot Placeholder — `docs/screenshots/03-brokerage-research.png` ]**
-<!-- ![Brokerage Research Hub](docs/screenshots/03-brokerage-research.png) -->
+ ![Brokerage Research Hub](docs/screenshots/03-brokerage-research.png) 
 
 ### 4. Mutual Funds SECP FMR Fact Sheet, AMC Leaderboard & Holdings Overlap Lab (`/funds`)
 > **[ Screenshot Placeholder — `docs/screenshots/04-mutual-funds-lab.png` ]**
-<!-- ![Mutual Funds Lab & SECP FMR](docs/screenshots/04-mutual-funds-lab.png) -->
+ ![Mutual Funds Lab & SECP FMR](docs/screenshots/04-mutual-funds-lab.png) 
 
 ### 5. Forex & Remittance Hub (`/markets/forex`) & PMEX Commodities (`/markets/commodities`)
 | Forex & 14 PKR Corridors | PMEX & Pakistan Gold Parity Board |
 |---|---|
 | **[ Screenshot Placeholder — `docs/screenshots/05-forex-remittance.png` ]** | **[ Screenshot Placeholder — `docs/screenshots/06-pmex-commodities.png` ]** |
-<!-- ![Forex Hub](docs/screenshots/05-forex-remittance.png) | ![PMEX Commodities](docs/screenshots/06-pmex-commodities.png) -->
+ ![Forex Hub](docs/screenshots/05-forex-remittance.png) | ![PMEX Commodities](docs/screenshots/06-pmex-commodities.png) 
 
 ### 6. Fixed Income, GoP Ijarah Sukuk & National Savings After-Tax Comparator (`/markets/fixed-income`)
 > **[ Screenshot Placeholder — `docs/screenshots/07-fixed-income-nss.png` ]**
-<!-- ![Fixed Income & NSS Comparator](docs/screenshots/07-fixed-income-nss.png) -->
+ ![Fixed Income & NSS Comparator](docs/screenshots/07-fixed-income-nss.png) 
 
 ### 7. Multi-Asset FBR Portfolio Ledger, 12-Month Dividend Snowball Calendar & Quant Lab (`/portfolio`)
 > **[ Screenshot Placeholder — `docs/screenshots/08-portfolio-dividends.png` ]**
-<!-- ![Portfolio & Dividend Snowball Calendar](docs/screenshots/08-portfolio-dividends.png) -->
+ ![Portfolio & Dividend Snowball Calendar](docs/screenshots/08-portfolio-dividends.png) 
 
 ---
 
